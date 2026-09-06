@@ -9,3 +9,9 @@ xgboost
 lightgbm
 shap
 imbalanced-learn
+torch
+torch-geometric
+hdbscan
+faiss-cpu
+networkx
+duckdb
