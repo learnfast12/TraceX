@@ -1,0 +1,46 @@
+nohup: ignoring input
+[1/25] fold done (16s elapsed, ~384s remaining)
+[2/25] fold done (28s elapsed, ~322s remaining)
+[3/25] fold done (57s elapsed, ~418s remaining)
+[4/25] fold done (83s elapsed, ~438s remaining)
+[5/25] fold done (96s elapsed, ~385s remaining)
+[6/25] fold done (113s elapsed, ~359s remaining)
+[7/25] fold done (123s elapsed, ~316s remaining)
+[8/25] fold done (132s elapsed, ~281s remaining)
+[9/25] fold done (141s elapsed, ~250s remaining)
+[10/25] fold done (152s elapsed, ~229s remaining)
+[11/25] fold done (163s elapsed, ~208s remaining)
+[12/25] fold done (173s elapsed, ~188s remaining)
+[13/25] fold done (182s elapsed, ~168s remaining)
+[14/25] fold done (191s elapsed, ~150s remaining)
+[15/25] fold done (202s elapsed, ~135s remaining)
+[16/25] fold done (212s elapsed, ~119s remaining)
+[17/25] fold done (226s elapsed, ~107s remaining)
+[18/25] fold done (239s elapsed, ~93s remaining)
+[19/25] fold done (248s elapsed, ~78s remaining)
+[20/25] fold done (258s elapsed, ~64s remaining)
+[21/25] fold done (268s elapsed, ~51s remaining)
+[22/25] fold done (278s elapsed, ~38s remaining)
+[23/25] fold done (288s elapsed, ~25s remaining)
+[24/25] fold done (297s elapsed, ~12s remaining)
+[25/25] fold done (307s elapsed, ~0s remaining)
+
+============================================================
+FINAL RESULTS
+============================================================
+  method: Stratified nested CV, 5 repeats x 5 outer x 3 inner folds, sigmoid-calibrated XGBoost, F1-optimal threshold selected on inner OOF predictions only
+  precision_mean: 0.8804
+  precision_std: 0.0747
+  recall_mean: 0.731
+  recall_std: 0.0951
+  f1_mean: 0.7926
+  f1_std: 0.0572
+  auc_roc_mean: 0.9907
+  auc_roc_std: 0.0131
+  n_outer_evaluations: 25
+  threshold_min: 0.4993
+  threshold_max: 0.9867
+  threshold_mean: 0.8842
+  runtime_seconds: 306.8
+
+Saved to /home/x0_shravan_0x/Tracenetx/backend/nested_cv_results.json
