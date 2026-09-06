@@ -68,9 +68,24 @@ def compute_first_seen(tx_map):
     return first_seen
 
 
+def compute_ever_spent_from(tx_map):
+    """Wallets that appear as an INPUT on any transaction, anywhere in the
+    dataset. A genuine change address stays under the entity's control and
+    gets spent again later; a one-time external payment recipient never
+    does. This is a real, non-ambiguous signal — unlike raw 'freshness',
+    which cannot distinguish a change address from a one-time external
+    payee (both are first-seen at the exact same transaction)."""
+    spent_from = set()
+    for txid, data in tx_map.items():
+        for wallet, amount, ts in data["inputs"]:
+            spent_from.add(wallet)
+    return spent_from
+
+
 def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
     tx_map = load_transactions(tx_csv_path)
     first_seen = compute_first_seen(tx_map)
+    ever_spent_from = compute_ever_spent_from(tx_map)
     uf = UnionFind()
 
     reasons = defaultdict(list)  # (wallet_a, wallet_b) -> reason strings, for audit trail
@@ -90,16 +105,17 @@ def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
 
         # --- Rule 2: change-address heuristic ---
         # Only meaningful for the classic 2-output payment+change shape, and
-        # only applied when EXACTLY ONE output looks like change. If both (or
-        # neither) outputs qualify, the signal is ambiguous — skip rather than
-        # guess, to avoid merging an external counterparty into this entity.
+        # only applied when EXACTLY ONE output looks like change. Signal:
+        # first-seen at this tx (genuinely new address) AND spent from again
+        # later (stays under the entity's control) — NOT mere freshness,
+        # which can't distinguish change from a one-time external payee.
         outputs = data["outputs"]
         if len(outputs) == 2:
             candidates = []
             for wallet, amount, ts in outputs:
                 is_fresh = first_seen.get(wallet) == ts
-                is_nonround = abs(amount - round(amount, 2)) > round_amount_tolerance
-                if is_fresh and is_nonround:
+                is_respent = wallet in ever_spent_from
+                if is_fresh and is_respent:
                     candidates.append(wallet)
             if len(candidates) == 1:
                 change_wallet = candidates[0]
