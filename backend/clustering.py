@@ -89,17 +89,23 @@ def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
             continue
 
         # --- Rule 2: change-address heuristic ---
-        # only meaningful for the classic 2-output payment+change shape
+        # Only meaningful for the classic 2-output payment+change shape, and
+        # only applied when EXACTLY ONE output looks like change. If both (or
+        # neither) outputs qualify, the signal is ambiguous — skip rather than
+        # guess, to avoid merging an external counterparty into this entity.
         outputs = data["outputs"]
         if len(outputs) == 2:
-            (w1, a1, t1), (w2, a2, t2) = outputs
-            for change_wallet, change_amount, change_ts in [(w1, a1, t1), (w2, a2, t2)]:
-                is_fresh = first_seen.get(change_wallet) == change_ts
-                is_nonround = abs(change_amount - round(change_amount, 2)) > round_amount_tolerance
+            candidates = []
+            for wallet, amount, ts in outputs:
+                is_fresh = first_seen.get(wallet) == ts
+                is_nonround = abs(amount - round(amount, 2)) > round_amount_tolerance
                 if is_fresh and is_nonround:
-                    uf.union(input_wallets[0], change_wallet)
-                    reasons[(input_wallets[0], change_wallet)].append(
-                        f"change_address:{txid}")
+                    candidates.append(wallet)
+            if len(candidates) == 1:
+                change_wallet = candidates[0]
+                uf.union(input_wallets[0], change_wallet)
+                reasons[(input_wallets[0], change_wallet)].append(
+                    f"change_address:{txid}")
 
     clusters = uf.groups()
     return clusters, reasons

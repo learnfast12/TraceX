@@ -63,23 +63,20 @@ def generate_dataset(config=None):
             all_entities.append(entity)
             entity_id += 1
 
-    # deterministic wallet_id -> cosmetic bech32 mapping, built once
-    wallet_map = {}
-    for e in all_entities:
-        for w in e.wallets:
-            wallet_map[w] = _bech32_cosmetic(w)
-
+    # _bech32_cosmetic is a pure deterministic function of wallet_id, so we
+    # can wrap ANY wallet string on the fly — including external/untracked
+    # counterparty wallets that never appear in an entity's own .wallets list.
     tx_rows, relay_rows, ground_truth = [], [], []
 
     for e in all_entities:
         for row in e.transactions:
             row = dict(row)
-            row["wallet"] = wallet_map[row["wallet"]]
+            row["wallet"] = _bech32_cosmetic(row["wallet"])
             tx_rows.append(row)
         for row in e.relay_events:
             relay_rows.append(row)
         gt = e.ground_truth()
-        gt["wallets"] = [wallet_map[w] for w in gt["wallets"]]
+        gt["wallets"] = [_bech32_cosmetic(w) for w in gt["wallets"]]
         ground_truth.append(gt)
 
     tx_path = os.path.join(OUTPUT_DIR, "bitcoin_transactions.csv")
