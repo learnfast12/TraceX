@@ -58,25 +58,54 @@ def load_transactions(tx_csv_path):
     return tx_map
 
 
-def compute_first_seen(tx_map):
-    """Earliest timestamp at which each wallet appears anywhere (input or output)."""
+def compute_first_seen(tx_map, excluded_txids=None):
+    """Earliest timestamp at which each wallet appears anywhere (input or
+    output), IGNORING CoinJoin-excluded transactions.
+
+    A wallet's real "first seen" for change-address purposes should be its
+    first appearance in the entity's own ordinary transaction history. If a
+    wallet is later drawn into an unrelated CoinJoin round with a timestamp
+    that happens to fall earlier than the wallet's real first transaction
+    (Phase-2 mixer rounds get independently-random timestamps, uncorrelated
+    with Phase-1 generation order), first_seen gets hijacked to that
+    CoinJoin timestamp — which then makes is_fresh=False for the wallet's
+    genuine change-output transaction, silently breaking Rule 2. Confirmed
+    via direct check: 36/410 wallets on fragmented legit_business entities
+    had their earliest appearance land inside a CoinJoin-excluded tx."""
+    excluded_txids = excluded_txids or set()
     first_seen = {}
     for txid, data in tx_map.items():
+        if txid in excluded_txids:
+            continue
         for wallet, amount, ts in data["inputs"] + data["outputs"]:
             if wallet not in first_seen or ts < first_seen[wallet]:
                 first_seen[wallet] = ts
     return first_seen
 
 
-def compute_ever_spent_from(tx_map):
-    """Wallets that appear as an INPUT on any transaction, anywhere in the
-    dataset. A genuine change address stays under the entity's control and
-    gets spent again later; a one-time external payment recipient never
-    does. This is a real, non-ambiguous signal — unlike raw 'freshness',
-    which cannot distinguish a change address from a one-time external
-    payee (both are first-seen at the exact same transaction)."""
+def compute_ever_spent_from(tx_map, excluded_txids=None):
+    """Wallets that appear as an INPUT on any NON-CoinJoin transaction,
+    anywhere in the dataset. A genuine change address stays under the
+    entity's control and gets spent again later; a one-time external
+    payment recipient never does. This is a real, non-ambiguous signal —
+    unlike raw 'freshness', which cannot distinguish a change address from
+    a one-time external payee (both are first-seen at the exact same
+    transaction).
+
+    CoinJoin-excluded transactions are deliberately skipped here: a wallet
+    being spent as one of many unrelated co-signer inputs in a mix round is
+    not evidence that the wallet is under the SAME entity's ongoing control
+    (the whole point of CoinJoin is that those co-signers are unrelated).
+    Counting a CoinJoin spend as "ever_spent_from" evidence let mix
+    participation leak false change-address signal into Rule 2 for
+    legit_business wallets that happened to join a round — confirmed via
+    ablation (legit_business conditional recall: 0.76 with CoinJoin spends
+    counted vs 1.0 with them excluded)."""
+    excluded_txids = excluded_txids or set()
     spent_from = set()
     for txid, data in tx_map.items():
+        if txid in excluded_txids:
+            continue
         for wallet, amount, ts in data["inputs"]:
             spent_from.add(wallet)
     return spent_from
@@ -105,18 +134,22 @@ def is_likely_coinjoin(data, min_participants=5, denom_cv_threshold=0.05):
 
 def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
     tx_map = load_transactions(tx_csv_path)
-    first_seen = compute_first_seen(tx_map)
-    ever_spent_from = compute_ever_spent_from(tx_map)
+
+    # Two-pass: identify CoinJoin-shaped txids FIRST, so ever_spent_from can
+    # exclude spends that happen inside them (see compute_ever_spent_from
+    # docstring — prevents mix participation from faking change-address signal).
+    excluded_coinjoin_txids = [txid for txid, data in tx_map.items() if is_likely_coinjoin(data)]
+    excluded_set = set(excluded_coinjoin_txids)
+    first_seen = compute_first_seen(tx_map, excluded_txids=excluded_set)
+    ever_spent_from = compute_ever_spent_from(tx_map, excluded_txids=excluded_set)
     uf = UnionFind()
 
     reasons = defaultdict(list)  # (wallet_a, wallet_b) -> reason strings, for audit trail
-    excluded_coinjoin_txids = []
 
     for txid, data in tx_map.items():
         input_wallets = [w for w, amt, ts in data["inputs"]]
 
-        if is_likely_coinjoin(data):
-            excluded_coinjoin_txids.append(txid)
+        if txid in excluded_coinjoin_txids:
             continue  # skip Rule 1 entirely — do not let CoinJoin participants merge
 
         # --- Rule 1: common-input-ownership ---

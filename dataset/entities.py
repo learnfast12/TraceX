@@ -9,6 +9,12 @@ import random
 import uuid
 from datetime import datetime, timedelta
 
+# RFC 5737 documentation-range addresses (never resolve to real hosts) —
+# used purely as a synthetic "known Tor-exit-style" pool so the
+# careful-launderer / darknet-vendor infra-rotation signal has something
+# concrete to draw from even when config.yaml has no tor_like_ip_pool.
+TOR_LIKE_IP_POOL = [f"203.0.113.{i}" for i in range(10, 60)]
+
 
 class BaseEntity:
     entity_type = "base"
@@ -113,7 +119,10 @@ class LegitIndividual(BaseEntity):
         for _ in range(random.randint(1, 2)):
             self._new_wallet()
         t = self.start_time
-        home_ip = self._random_ip()
+        # Dominant home IP with occasional switches (mobile data, different
+        # Wi-Fi) — full-time single-IP reuse would make legit users look
+        # identical to ransomware collectors on this signal.
+        ip_pool = [self._random_ip() for _ in range(random.randint(1, 3))]
 
         for _ in range(random.randint(2, 15)):
             t += timedelta(hours=random.randint(6, 96))
@@ -129,7 +138,7 @@ class LegitIndividual(BaseEntity):
                 outputs = [(self._external_wallet(), in_amount)]
 
             txid = self._make_tx(t, [(in_wallet, in_amount)], outputs)
-            self._record_relay(txid, t, home_ip)
+            self._record_relay(txid, t, random.choice(ip_pool))
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +255,11 @@ class PeelingChainLauncher(BaseEntity):
         t = self.start_time
         current_wallet = self._new_wallet()
 
+        # Network-fingerprint reuse IS the sloppy-vs-careful signal: sloppy
+        # launderers reuse ONE relay origin across the whole chain (a real,
+        # catchable tell); careful launderers rotate infra every hop.
+        sloppy_ip = self._random_ip()
+
         for _ in range(chain_length):
             next_wallet = self._new_wallet()
             peel_fraction = random.uniform(0.03, 0.08)
@@ -257,10 +271,10 @@ class PeelingChainLauncher(BaseEntity):
                                   [(peel_sink, peeled), (next_wallet, remainder)])
 
             if self.careful:
-                ip = self._random_ip(self.config.get("tor_like_ip_pool"))
+                ip = self._random_ip(self.config.get("tor_like_ip_pool") or TOR_LIKE_IP_POOL)
                 t += timedelta(hours=random.uniform(4, 48))
             else:
-                ip = self._random_ip()
+                ip = sloppy_ip  # reused every hop — this is the catchable infra tell
                 t += timedelta(minutes=random.uniform(10, 90))
 
             self._record_relay(txid, t, ip)
@@ -347,7 +361,7 @@ class DarknetVendor(BaseEntity):
         receiving_wallets = [self._new_wallet() for _ in range(random.randint(5, 15))]
         vault_wallet = self._new_wallet()
         t = self.start_time
-        vendor_ip_pool = [self._random_ip(self.config.get("tor_like_ip_pool"))
+        vendor_ip_pool = [self._random_ip(self.config.get("tor_like_ip_pool") or TOR_LIKE_IP_POOL)
                            for _ in range(random.randint(2, 5))]
 
         pending = []
