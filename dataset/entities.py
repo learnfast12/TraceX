@@ -283,25 +283,55 @@ class PeelingChainCareful(PeelingChainLauncher):
 # ---------------------------------------------------------------------------
 
 class MixerService(BaseEntity):
-    entity_type = "mixer_coinjoin"
-    is_illicit = True
+    """
+    A real CoinJoin service owns no identity of its own — it is a coordination
+    protocol that unrelated participants use specifically to defeat
+    common-input-ownership clustering. Modeling it as an entity that "owns"
+    all round participants is backwards and (if a legit entity's wallet ever
+    got drawn into a round) would silently corrupt Union-Find purity for
+    entities that have nothing to do with the mix.
 
-    def generate(self):
+    generate() therefore requires an external `participant_pool`: real
+    wallets belonging to OTHER already-generated entities. This entity's own
+    .wallets stays empty — it is not a wallet-owning identity, just the
+    generator of the round transactions. coinjoin_txids collects every txid
+    it produces, exported separately as ground truth for the PATTERN
+    DETECTOR (Tier 2), not for entity-clustering evaluation (Tier 1).
+    """
+    entity_type = "mixer_coinjoin"
+    is_illicit = False  # participating in a mix isn't itself illicit; the SERVICE is neutral infra
+
+    def generate(self, participant_pool=None):
+        if not participant_pool:
+            raise ValueError("MixerService.generate() requires a non-empty participant_pool")
+
+        self.coinjoin_txids = []
         t = self.start_time
         std_denom = random.choice([0.01, 0.05, 0.1, 0.5, 1.0])
 
         for _ in range(random.randint(3, 10)):
             round_ip_pool = [self._random_ip() for _ in range(random.randint(2, 4))]
-            n = random.randint(5, 15)
+            n = min(random.randint(5, 15), len(participant_pool))
+            participants = random.sample(participant_pool, n)
 
             inputs, outputs = [], []
-            for _ in range(n):
-                inputs.append((self._new_wallet(), round(std_denom * random.uniform(1.0, 1.02), 8)))
-                outputs.append((self._new_wallet(), round(std_denom * random.uniform(0.995, 1.005), 8)))
+            for wallet in participants:
+                inputs.append((wallet, round(std_denom * random.uniform(1.0, 1.02), 8)))
+                # output goes to a FRESH wallet under the SAME real owner in practice,
+                # but at the dataset level we route it back to an external sink —
+                # post-mix withdrawal address tracking is genuinely out of scope
+                # for common-input clustering and belongs to shadow-identity work.
+                outputs.append((self._external_wallet(), round(std_denom * random.uniform(0.995, 1.005), 8)))
 
-            txid = self._make_tx(t, inputs, outputs)  # single shared tx — real CoinJoin
+            txid = self._make_tx(t, inputs, outputs)
             self._record_relay(txid, t, random.choice(round_ip_pool))
+            self.coinjoin_txids.append(txid)
             t += timedelta(hours=random.uniform(1, 24))
+
+    def ground_truth(self):
+        gt = super().ground_truth()
+        gt["coinjoin_txids"] = list(getattr(self, "coinjoin_txids", []))
+        return gt
 
 
 # ---------------------------------------------------------------------------

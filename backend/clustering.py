@@ -82,6 +82,27 @@ def compute_ever_spent_from(tx_map):
     return spent_from
 
 
+def is_likely_coinjoin(data, min_participants=5, denom_cv_threshold=0.05):
+    """
+    Shape-based CoinJoin detector: many inputs, many outputs, output amounts
+    clustered tightly around a common denomination (low coefficient of
+    variation). This is the well-documented failure mode of naive
+    common-input-ownership clustering (Moser & Bohme et al.) — real forensic
+    tools must detect and EXCLUDE this shape from Rule 1, or they wrongly
+    weld unrelated participants into one false entity.
+    """
+    n_in, n_out = len(data["inputs"]), len(data["outputs"])
+    if n_in < min_participants or n_out < min_participants:
+        return False
+    amounts = [a for _, a, _ in data["outputs"]]
+    mean = sum(amounts) / len(amounts)
+    if mean == 0:
+        return False
+    variance = sum((a - mean) ** 2 for a in amounts) / len(amounts)
+    cv = (variance ** 0.5) / mean
+    return cv < denom_cv_threshold
+
+
 def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
     tx_map = load_transactions(tx_csv_path)
     first_seen = compute_first_seen(tx_map)
@@ -89,9 +110,14 @@ def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
     uf = UnionFind()
 
     reasons = defaultdict(list)  # (wallet_a, wallet_b) -> reason strings, for audit trail
+    excluded_coinjoin_txids = []
 
     for txid, data in tx_map.items():
         input_wallets = [w for w, amt, ts in data["inputs"]]
+
+        if is_likely_coinjoin(data):
+            excluded_coinjoin_txids.append(txid)
+            continue  # skip Rule 1 entirely — do not let CoinJoin participants merge
 
         # --- Rule 1: common-input-ownership ---
         # every input wallet on the same tx must be co-signed by the same entity
@@ -124,7 +150,7 @@ def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
                     f"change_address:{txid}")
 
     clusters = uf.groups()
-    return clusters, reasons
+    return clusters, reasons, excluded_coinjoin_txids
 
 
 # Archetypes whose TRUE laundering behavior deliberately avoids shared-input /
@@ -225,10 +251,27 @@ def evaluate_against_ground_truth(clusters, ground_truth_path):
     }
 
 
+def evaluate_coinjoin_detection(excluded_txids, coinjoin_gt_path):
+    true_coinjoin = set(json.load(open(coinjoin_gt_path)))
+    detected = set(excluded_txids)
+    tp = len(detected & true_coinjoin)
+    fp = len(detected - true_coinjoin)
+    fn = len(true_coinjoin - detected)
+    precision = tp / (tp + fp) if (tp + fp) else None
+    recall = tp / (tp + fn) if (tp + fn) else None
+    return {"true_positives": tp, "false_positives": fp, "false_negatives": fn,
+            "precision": round(precision, 4) if precision is not None else None,
+            "recall": round(recall, 4) if recall is not None else None}
+
+
 if __name__ == "__main__":
-    clusters, reasons = cluster_entities("dataset/output/bitcoin_transactions.csv")
+    clusters, reasons, excluded_coinjoin = cluster_entities("dataset/output/bitcoin_transactions.csv")
     metrics = evaluate_against_ground_truth(clusters, "dataset/output/ground_truth.json")
     print(json.dumps(metrics, indent=2))
+
+    cj_metrics = evaluate_coinjoin_detection(excluded_coinjoin, "dataset/output/coinjoin_ground_truth.json")
+    print("\nCoinJoin shape-detection (Tier-2 signal, evaluated separately):")
+    print(json.dumps(cj_metrics, indent=2))
 
     cluster_sizes = sorted((len(w) for w in clusters.values()), reverse=True)
     print(f"\nLargest 10 cluster sizes: {cluster_sizes[:10]}")

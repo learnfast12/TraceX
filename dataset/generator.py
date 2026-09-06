@@ -53,15 +53,35 @@ def generate_dataset(config=None):
     random.seed(config.get("seed", 42))
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # Phase 1: every archetype EXCEPT the mixer generates independently and
+    # builds up its own wallet history first.
     all_entities = []
     entity_id = 0
     for archetype_name, count in config["archetype_counts"].items():
+        if archetype_name == "mixer_coinjoin":
+            continue
         cls = ARCHETYPES[archetype_name]
         for _ in range(count):
             entity = cls(entity_id=f"{entity_id:05d}", config=config)
             entity.generate()
             all_entities.append(entity)
             entity_id += 1
+
+    # Phase 2: build a pool of real wallets a mixer could plausibly draw from —
+    # legit individuals/businesses seeking privacy, plus darknet vendors laundering
+    # proceeds. Deliberately excludes peeling-chain/ransomware wallets: those
+    # archetypes already have their own obfuscation technique and mixing them in
+    # would blur what each pattern detector is independently supposed to catch.
+    pool_types = {"legit_individual", "legit_business", "darknet_vendor"}
+    participant_pool = [w for e in all_entities if e.entity_type in pool_types for w in e.wallets]
+
+    mixer_count = config["archetype_counts"].get("mixer_coinjoin", 0)
+    cls = ARCHETYPES["mixer_coinjoin"]
+    for _ in range(mixer_count):
+        entity = cls(entity_id=f"{entity_id:05d}", config=config)
+        entity.generate(participant_pool=participant_pool)
+        all_entities.append(entity)
+        entity_id += 1
 
     # _bech32_cosmetic is a pure deterministic function of wallet_id, so we
     # can wrap ANY wallet string on the fly — including external/untracked
@@ -96,6 +116,17 @@ def generate_dataset(config=None):
     gt_path = os.path.join(OUTPUT_DIR, "ground_truth.json")
     with open(gt_path, "w") as f:
         json.dump(ground_truth, f, indent=2)
+
+    # CoinJoin txids, bech32-wrapped, exported separately — this is Tier-2
+    # PATTERN DETECTOR ground truth (is this txid a real mix?), not Tier-1
+    # entity-clustering ground truth (participants are borrowed real wallets
+    # from other entities, not owned by the mixer).
+    coinjoin_txids = set()
+    for e in all_entities:
+        coinjoin_txids.update(getattr(e, "coinjoin_txids", []))
+    coinjoin_path = os.path.join(OUTPUT_DIR, "coinjoin_ground_truth.json")
+    with open(coinjoin_path, "w") as f:
+        json.dump(sorted(coinjoin_txids), f, indent=2)
 
     print(f"Entities generated: {len(all_entities)}")
     print(f"Transaction rows:   {len(tx_rows)}  -> {tx_path}")
