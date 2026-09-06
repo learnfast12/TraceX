@@ -111,12 +111,23 @@ def cluster_entities(tx_csv_path, round_amount_tolerance=1e-6):
     return clusters, reasons
 
 
+# Archetypes whose TRUE laundering behavior deliberately avoids shared-input /
+# change-address signatures (peeling = fresh wallet per hop, mixer = unrelated
+# co-signers by design, ransomware sweep = single-in/single-out). Tier-1
+# deterministic clustering is not meant to resolve these — Tier-2 pattern
+# detection (chain-walk, equal-denomination matching) is. Kept as a separate
+# reporting bucket so the headline number isn't measuring the wrong layer.
+CLUSTERING_APPLICABLE_TYPES = {"legit_individual", "legit_business", "darknet_vendor"}
+
+
 def evaluate_against_ground_truth(clusters, ground_truth_path):
     """
     Purity: for each computed cluster, what fraction of its wallets share the
     same true entity_id (precision-like — are we over-merging different entities?).
     Recall: for each true entity with >=2 wallets, were all its wallets placed
     in the same computed cluster (are we under-merging / missing links?).
+    An entity whose wallets never entered ANY cluster counts as a recall=0
+    miss — it is never silently dropped from the denominator.
     """
     gt = json.load(open(ground_truth_path))
     wallet_to_true_entity = {}
@@ -124,7 +135,6 @@ def evaluate_against_ground_truth(clusters, ground_truth_path):
         for w in g["wallets"]:
             wallet_to_true_entity[w] = g["entity_id"]
 
-    # purity
     purities = []
     for cluster_wallets in clusters.values():
         true_ids = [wallet_to_true_entity.get(w) for w in cluster_wallets if w in wallet_to_true_entity]
@@ -136,27 +146,40 @@ def evaluate_against_ground_truth(clusters, ground_truth_path):
 
     weighted_purity = sum(p * n for p, n in purities) / sum(n for _, n in purities) if purities else 0
 
-    # recall: multi-wallet entities only
     wallet_to_cluster_root = {}
     for root, wallets in clusters.items():
         for w in wallets:
             wallet_to_cluster_root[w] = root
 
-    recalls = []
+    per_type = {}
     for g in gt:
-        wallets = [w for w in g["wallets"] if w in wallet_to_cluster_root]
+        wallets = g["wallets"]
         if len(wallets) < 2:
             continue
-        roots = set(wallet_to_cluster_root[w] for w in wallets)
-        recalls.append(1.0 if len(roots) == 1 else 0.0)
+        roots = set(wallet_to_cluster_root.get(w) for w in wallets)  # None counts as a distinct "root"
+        hit = 1.0 if len(roots) == 1 and None not in roots else 0.0
+        et = g["entity_type"]
+        per_type.setdefault(et, []).append(hit)
 
-    recall_rate = sum(recalls) / len(recalls) if recalls else 0
+    overall_recalls = [h for hits in per_type.values() for h in hits]
+    overall_recall = sum(overall_recalls) / len(overall_recalls) if overall_recalls else 0
+
+    applicable_recalls = [h for et, hits in per_type.items()
+                           if et in CLUSTERING_APPLICABLE_TYPES for h in hits]
+    applicable_recall = sum(applicable_recalls) / len(applicable_recalls) if applicable_recalls else 0
 
     return {
         "num_clusters": len(clusters),
         "weighted_purity": round(weighted_purity, 4),
-        "multi_wallet_entity_recall": round(recall_rate, 4),
-        "multi_wallet_entities_checked": len(recalls),
+        "overall_multi_wallet_recall": round(overall_recall, 4),
+        "overall_entities_checked": len(overall_recalls),
+        "clustering_applicable_recall": round(applicable_recall, 4),
+        "clustering_applicable_entities_checked": len(applicable_recalls),
+        "per_type_recall": {
+            et: {"recall": round(sum(hits) / len(hits), 4), "n": len(hits),
+                 "clustering_applicable": et in CLUSTERING_APPLICABLE_TYPES}
+            for et, hits in sorted(per_type.items())
+        },
     }
 
 

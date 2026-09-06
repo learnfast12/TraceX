@@ -141,6 +141,16 @@ class LegitBusiness(BaseEntity):
     entity_type = "legit_business"
     is_illicit = False
 
+    def _pick_spend_wallet(self):
+        """Real coin-selection prefers recently-received UTXOs over uniform
+        draws across an entity's entire address history. 70% of the time,
+        pick from the 3 most-recently-created wallets; 30% uniform (models
+        occasionally sweeping an old, dormant address)."""
+        recent = self.wallets[-3:]
+        if random.random() < 0.7 and recent:
+            return random.choice(recent)
+        return random.choice(self.wallets)
+
     def generate(self):
         for _ in range(random.randint(3, 8)):
             self._new_wallet()
@@ -162,7 +172,7 @@ class LegitBusiness(BaseEntity):
 
             elif roll < 0.20:
                 # batch payout — one input, several external recipients
-                in_wallet = random.choice(self.wallets)
+                in_wallet = self._pick_spend_wallet()
                 in_amount = round(random.lognormvariate(0.0, 1.0), 8)
                 n = random.randint(3, 6)
                 shares = [random.random() for _ in range(n)]
@@ -171,7 +181,7 @@ class LegitBusiness(BaseEntity):
                 txid = self._make_tx(t, [(in_wallet, in_amount)], outputs)
 
             else:
-                in_wallet = random.choice(self.wallets)
+                in_wallet = self._pick_spend_wallet()
                 in_amount = round(random.lognormvariate(-1.0, 1.0), 8)
                 if random.random() < 0.4 and in_amount > 0.003:
                     pay_amt = round(in_amount * random.uniform(0.3, 0.7), 8)
