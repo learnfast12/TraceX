@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .gstack/
+
+# TRACE-X synthetic dataset — regeneratable, not committed
+dataset/output/*
+!dataset/output/.gitkeep

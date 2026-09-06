@@ -1,0 +1,26 @@
+# TRACE-X Synthetic Dataset Generator — Configuration
+seed: 42
+
+scale:
+  total_wallets: 5000
+
+# Population ratios must sum to 1.0
+archetypes:
+  legit_individual:       0.70
+  legit_business:         0.10
+  ransomware_collector:   0.03
+  peeling_launderer_sloppy:  0.04
+  peeling_launderer_careful: 0.04
+  mixer_service:          0.03
+  darknet_vendor:         0.06
+
+confusers:
+  legit_large_one_off_payment_rate: 0.05   # fraction of legit individuals who get one rare large payment
+  legit_business_split_payment_rate: 0.08  # fraction of legit businesses with peeling-like 2-output splits
+
+network:
+  relay_fanout_min: 2      # min number of relay-observation rows per TXID (gossip propagation)
+  relay_fanout_max: 6
+  timing_jitter_seconds: 3 # random delay added per relay hop
+
+output_dir: dataset/output
