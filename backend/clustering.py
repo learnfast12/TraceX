@@ -156,30 +156,56 @@ def evaluate_against_ground_truth(clusters, ground_truth_path):
         wallets = g["wallets"]
         if len(wallets) < 2:
             continue
-        roots = set(wallet_to_cluster_root.get(w) for w in wallets)  # None counts as a distinct "root"
-        hit = 1.0 if len(roots) == 1 and None not in roots else 0.0
+        # coverage: fraction of this entity's wallets that ever entered ANY
+        # Tier-1 clustering rule (appeared in a >=2-input tx, or was resolved
+        # as a unique change-address candidate). A wallet that only ever
+        # appears as a lone recipient has zero opportunity to be linked by
+        # these rules — that is a real ceiling on deterministic clustering,
+        # not a bug, so it is measured separately rather than counted as a miss.
+        linked_wallets = [w for w in wallets if w in wallet_to_cluster_root]
+        coverage = len(linked_wallets) / len(wallets)
+
+        # conditional recall: of the wallets that DID have a linking
+        # opportunity, were they all placed in the same cluster?
+        cond_hit = None
+        if len(linked_wallets) >= 2:
+            roots = set(wallet_to_cluster_root[w] for w in linked_wallets)
+            cond_hit = 1.0 if len(roots) == 1 else 0.0
+
         et = g["entity_type"]
-        per_type.setdefault(et, []).append(hit)
+        per_type.setdefault(et, {"coverage": [], "cond_recall": []})
+        per_type[et]["coverage"].append(coverage)
+        if cond_hit is not None:
+            per_type[et]["cond_recall"].append(cond_hit)
 
-    overall_recalls = [h for hits in per_type.values() for h in hits]
-    overall_recall = sum(overall_recalls) / len(overall_recalls) if overall_recalls else 0
+    def _avg(lst):
+        return round(sum(lst) / len(lst), 4) if lst else None
 
-    applicable_recalls = [h for et, hits in per_type.items()
-                           if et in CLUSTERING_APPLICABLE_TYPES for h in hits]
-    applicable_recall = sum(applicable_recalls) / len(applicable_recalls) if applicable_recalls else 0
+    per_type_out = {}
+    all_coverage, all_cond_recall = [], []
+    applicable_coverage, applicable_cond_recall = [], []
+    for et, d in sorted(per_type.items()):
+        per_type_out[et] = {
+            "avg_coverage": _avg(d["coverage"]),
+            "conditional_recall": _avg(d["cond_recall"]),
+            "n": len(d["coverage"]),
+            "n_with_linking_opportunity": len(d["cond_recall"]),
+            "clustering_applicable": et in CLUSTERING_APPLICABLE_TYPES,
+        }
+        all_coverage += d["coverage"]
+        all_cond_recall += d["cond_recall"]
+        if et in CLUSTERING_APPLICABLE_TYPES:
+            applicable_coverage += d["coverage"]
+            applicable_cond_recall += d["cond_recall"]
 
     return {
         "num_clusters": len(clusters),
         "weighted_purity": round(weighted_purity, 4),
-        "overall_multi_wallet_recall": round(overall_recall, 4),
-        "overall_entities_checked": len(overall_recalls),
-        "clustering_applicable_recall": round(applicable_recall, 4),
-        "clustering_applicable_entities_checked": len(applicable_recalls),
-        "per_type_recall": {
-            et: {"recall": round(sum(hits) / len(hits), 4), "n": len(hits),
-                 "clustering_applicable": et in CLUSTERING_APPLICABLE_TYPES}
-            for et, hits in sorted(per_type.items())
-        },
+        "overall_avg_coverage": _avg(all_coverage),
+        "overall_conditional_recall": _avg(all_cond_recall),
+        "clustering_applicable_avg_coverage": _avg(applicable_coverage),
+        "clustering_applicable_conditional_recall": _avg(applicable_cond_recall),
+        "per_type": per_type_out,
     }
 
 
