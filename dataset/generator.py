@@ -17,7 +17,17 @@ DEFAULT_CONFIG = {
     "timespan_days": 180,
     "peel_min_hops": 6,
     "peel_max_hops": 20,
-    "tor_like_ip_pool": [f"185.220.10{n}.{random.randint(1,254)}" for n in range(1, 6)],
+    # tor_like_ip_pool is intentionally NOT built here. This dict is a
+    # module-level constant, evaluated once at import time -- BEFORE
+    # random.seed() ever runs inside generate_dataset(). Building the pool
+    # here with random.randint() consumed unseeded (os-random) state on
+    # every fresh `python3 generator.py` process, so the pool's actual IP
+    # values differed run-to-run even with a fixed seed. Transaction
+    # structure was unaffected (doesn't touch this pool's contents), which
+    # is why bitcoin_transactions.csv/ground_truth.json hashed identically
+    # while relay_events.csv (src_ip values, drawn via seeded random.choice
+    # over this pool) did not. See _build_tor_like_ip_pool(), called from
+    # generate_dataset() AFTER seeding.
     "ip_pool": None,  # None = fully random IPs for non-Tor archetypes
     "archetype_counts": {
         "legit_individual": 400,
@@ -30,6 +40,11 @@ DEFAULT_CONFIG = {
     },
     "seed": 42,
 }
+
+
+def _build_tor_like_ip_pool():
+    """Must only be called AFTER random.seed() has run for this process."""
+    return [f"185.220.10{n}.{random.randint(1,254)}" for n in range(1, 6)]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
@@ -49,8 +64,10 @@ def _bech32_cosmetic(wallet_id: str) -> str:
 
 
 def generate_dataset(config=None):
-    config = config or DEFAULT_CONFIG
+    config = dict(config or DEFAULT_CONFIG)  # copy — we're about to mutate a key
     random.seed(config.get("seed", 42))
+    if "tor_like_ip_pool" not in config or config["tor_like_ip_pool"] is None:
+        config["tor_like_ip_pool"] = _build_tor_like_ip_pool()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Phase 1: every archetype EXCEPT the mixer generates independently and
