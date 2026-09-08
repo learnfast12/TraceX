@@ -6,8 +6,17 @@ change-address detection meaningful instead of vacuous.
 """
 
 import random
-import uuid
 from datetime import datetime, timedelta
+
+def _seeded_hex(n_chars):
+    """uuid.uuid4() draws from os.urandom, ignoring random.seed() entirely —
+    that silently broke full dataset reproducibility (structure was
+    deterministic via random.*, but every wallet/tx ID still got a fresh
+    unseeded suffix each run). This drives ID randomness through the same
+    seeded `random` module as everything else, so a fixed seed regenerates
+    a byte-for-byte identical dataset — required for judges/teammates to
+    verify a submission against a from-scratch regeneration."""
+    return "".join(random.choice("0123456789abcdef") for _ in range(n_chars))
 
 # RFC 5737 documentation-range addresses (never resolve to real hosts) —
 # used purely as a synthetic "known Tor-exit-style" pool so the
@@ -30,11 +39,18 @@ class BaseEntity:
 
     # -- helpers -------------------------------------------------------
     def _random_start_time(self):
+        # datetime.now() is real wall-clock time, not seeded — using it here
+        # meant bitcoin_transactions.csv timestamps (and downstream ordering)
+        # differed between two runs with the identical seed, even though
+        # ground_truth.json (wallet/entity structure) was already fully
+        # reproducible. Anchor to a fixed reference instant instead so the
+        # entire dataset — not just its structure — is byte-reproducible.
+        anchor = self.config.get("_reference_now") or datetime(2026, 1, 1)
         days_back = random.randint(0, self.config.get("timespan_days", 180))
-        return datetime.now() - timedelta(days=days_back)
+        return anchor - timedelta(days=days_back)
 
     def _new_wallet(self):
-        wid = f"wallet_{self.entity_id}_{len(self.wallets):03d}_{uuid.uuid4().hex[:6]}"
+        wid = f"wallet_{self.entity_id}_{len(self.wallets):03d}_{_seeded_hex(6)}"
         self.wallets.append(wid)
         return wid
 
@@ -42,10 +58,10 @@ class BaseEntity:
         """Counterparty wallet NOT owned by this entity (victim, merchant, cash-out
         sink, other CoinJoin participant's own entity, etc). Never added to
         self.wallets, so it can never be pulled into this entity's cluster."""
-        return f"ext_{uuid.uuid4().hex[:10]}"
+        return f"ext_{_seeded_hex(10)}"
 
     def _new_txid(self):
-        return f"tx_{uuid.uuid4().hex[:16]}"
+        return f"tx_{_seeded_hex(16)}"
 
     def _random_ip(self, pool=None):
         pool = pool or self.config.get("ip_pool")
