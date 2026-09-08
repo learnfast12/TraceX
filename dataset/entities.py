@@ -364,11 +364,25 @@ class DarknetVendor(BaseEntity):
         vendor_ip_pool = [self._random_ip(self.config.get("tor_like_ip_pool") or TOR_LIKE_IP_POOL)
                            for _ in range(random.randint(2, 5))]
 
+        # Coverage guarantee: draw count (30-100) vs pool size (5-15) leaves a
+        # non-trivial chance (~12% per wallet at the worst-case 15-wallet /
+        # 30-draw combination) that a receiving wallet is never selected by
+        # random.choice, producing a ground-truth entity member with zero
+        # real transactions — structurally undetectable downstream. Build the
+        # draw order as every wallet once (shuffled) + random top-up draws,
+        # instead of pure random.choice, so every wallet in self.wallets is
+        # guaranteed at least one transaction.
+        n_draws = random.randint(30, 100)
+        n_draws = max(n_draws, len(receiving_wallets))
+        draw_order = receiving_wallets[:]
+        random.shuffle(draw_order)
+        draw_order += [random.choice(receiving_wallets) for _ in range(n_draws - len(receiving_wallets))]
+        random.shuffle(draw_order)
+
         pending = []
-        for _ in range(random.randint(30, 100)):
+        for wallet in draw_order:
             t += timedelta(hours=random.uniform(0.5, 12))
             buyer_wallet = self._external_wallet()
-            wallet = random.choice(receiving_wallets)
             amount = round(random.lognormvariate(-3.0, 0.8), 8)
             received_amt = round(amount * 0.999, 8)
             txid = self._make_tx(t, [(buyer_wallet, amount)], [(wallet, received_amt)])
@@ -381,6 +395,14 @@ class DarknetVendor(BaseEntity):
                 txid = self._make_tx(sweep_t, pending, [(vault_wallet, round(total * 0.998, 8))])
                 self._record_relay(txid, sweep_t, random.choice(vendor_ip_pool))
                 pending = []
+
+        # Flush any remainder so the sweep-coverage requirement above never
+        # silently drops a trailing partial batch.
+        if pending:
+            sweep_t = t + timedelta(hours=random.uniform(1, 6))
+            total = round(sum(a for _, a in pending), 8)
+            txid = self._make_tx(sweep_t, pending, [(vault_wallet, round(total * 0.998, 8))])
+            self._record_relay(txid, sweep_t, random.choice(vendor_ip_pool))
 
 
 ARCHETYPES = {
