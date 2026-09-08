@@ -100,6 +100,17 @@ def walk_chains(hop_from):
     hop) -> next_wallet C (via another hop) -> ... Chain roots are wallets
     that START a hop but are never themselves a next_wallet of another hop
     (i.e., nothing feeds into them from an earlier peel).
+
+    Also tracks peel_sink_wallets separately from the remainder-chain
+    wallets. A peel_sink is the cash-out destination of a single peel —
+    by construction it never respends within the chain (that's what makes
+    it the "peeled off" amount rather than the passed-along remainder), so
+    it can never become anyone's next_wallet and is structurally invisible
+    to the remainder-only `wallets` list. Ground truth counts these as
+    entity members; omitting them silently under-recalls every chain by
+    its hop count. They carry a different investigative meaning (cash-out
+    point, not a laundering hop) so they're reported as a distinct field
+    rather than merged into `wallets`.
     """
     is_next_wallet = set(h["next_wallet"] for h in hop_from.values())
     roots = [w for w in hop_from if w not in is_next_wallet]
@@ -108,18 +119,24 @@ def walk_chains(hop_from):
     for root in roots:
         chain_wallets = [root]
         chain_hops = []
+        peel_sink_wallets = []
         current = root
         seen = {root}
         while current in hop_from:
             hop = hop_from[current]
             chain_hops.append(hop)
+            peel_sink_wallets.append(hop["peel_sink"])
             nxt = hop["next_wallet"]
             if nxt in seen:
                 break  # guard against any accidental cycle
             chain_wallets.append(nxt)
             seen.add(nxt)
             current = nxt
-        chains.append({"wallets": chain_wallets, "hops": chain_hops})
+        chains.append({
+            "wallets": chain_wallets,
+            "hops": chain_hops,
+            "peel_sink_wallets": peel_sink_wallets,
+        })
     return chains
 
 
@@ -178,6 +195,7 @@ def detect_peeling_chains(tx_csv_path):
         confidence = score_chain(chain)
         flagged.append({
             "chain_wallets": chain["wallets"],
+            "peel_sink_wallets": chain["peel_sink_wallets"],
             "hop_count": len(chain["hops"]),
             "avg_skew_ratio": round(statistics.mean(h["skew_ratio"] for h in chain["hops"]), 4),
             "txids": [h["txid"] for h in chain["hops"]],

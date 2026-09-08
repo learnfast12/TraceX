@@ -241,7 +241,7 @@ def run_real_validation(csv_path=None):
         for i in top_idx
     ]
 
-    # --- HIGH-risk freeze-tier precision (mirrors MuleGuard's 69/70 = 98.6% style claim) ---
+    # --- HIGH-risk freeze-tier precision (mirrors TRACE-X's 69/70 = 98.6% style claim) ---
     final_proba = final_model.predict_proba(X_test)[:, 1]
     y_test_arr = y_test.values if hasattr(y_test, "values") else np.asarray(y_test)
     freeze_threshold = 0.9
@@ -280,7 +280,7 @@ def run_real_validation(csv_path=None):
         "dataset": {
             "source": "Bank of India CyberShield Hackathon 2026 — official dataset",
             "total_accounts": int(len(df)),
-            "confirmed_mules": int(y.sum()),
+            "confirmed_illicit": int(y.sum()),
             "positive_rate_pct": round(float(y.mean() * 100), 2),
             "feature_count_total_provided": 3924,
             "feature_count_used": len(feature_cols),
@@ -291,7 +291,7 @@ def run_real_validation(csv_path=None):
                 "0.9999 AUC-ROC. Investigation traced this to post-investigation fields "
                 "(F3895-F3923) that only exist after a bank analyst has already reviewed "
                 "an account -- training on them taught the model to recognize accounts "
-                "already flagged by humans, not genuine mule behavior."
+                "already flagged by humans, not genuine illicit behavior."
             ),
             "excluded_features": sorted(list(pipe.LEAKAGE_EXCLUDED_FEATURES)),
             "worst_offender": {
@@ -322,7 +322,7 @@ def run_real_validation(csv_path=None):
                 "0 = perfect, 0.25 = naive always-predict-base-rate baseline for this "
                 "class balance). ECE measures whether risk scores are trustworthy as "
                 "probabilities, not just useful for ranking -- e.g. whether accounts "
-                "scored 80-90 risk are actually mules roughly 80-90% of the time. "
+                "scored 80-90 risk are actually illicit roughly 80-90% of the time. "
                 "This is a distinct question from AUC-ROC, which only measures whether "
                 "risky accounts rank above safe ones, not whether the score value itself "
                 "is meaningful."

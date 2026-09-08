@@ -1,3 +1,6 @@
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from graph import init_db, get_graph_data, get_account_details
@@ -7,6 +10,19 @@ from graph_intelligence import graph_intel
 from response_engine import response_engine
 from real_validation import run_real_validation, run_nested_validation
 import pandas as pd
+import json as _json
+from collections import defaultdict
+from clustering import load_transactions
+from network_fusion import load_relay_map
+from pattern_detection import detect_peeling_chains
+from convergence_detection import detect_darknet_sweeps
+from risk_scoring import (
+    build_wallet_graph, build_seeds, personalized_pagerank,
+    compute_risk_ratio, compute_final_scores,
+)
+
+BTC_DATA_DIR = "dataset/output"
+btc_cache = {"loaded": False}
 
 app = FastAPI(
     title="TraceNetX v2.0",
@@ -23,11 +39,53 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup():
-    init_db()
-    # Train ML pipeline on startup
-    df = pd.read_csv("transactions.csv")
-    ml_pipeline.train(df)
-    print("[TraceNetX v2.0] All systems online.")
+    # Legacy TraceNetX banking-layer pipeline (Neo4j + transactions.csv) is
+    # not part of TRACE-X's offline Bitcoin deliverable and is not carried
+    # over in this fork — skip it gracefully if the dependency isn't present
+    # rather than blocking the whole app from booting.
+    try:
+        init_db()
+        df = pd.read_csv("transactions.csv")
+        ml_pipeline.train(df)
+        print("[TraceNetX v2.0] All systems online.")
+    except Exception as e:
+        print(f"[TraceNetX] Legacy banking-layer startup skipped ({type(e).__name__}: {e})")
+
+    try:
+        tx_csv = f"{BTC_DATA_DIR}/bitcoin_transactions.csv"
+        relay_csv = f"{BTC_DATA_DIR}/relay_events.csv"
+        btc_cache["tx_map"] = load_transactions(tx_csv)
+        btc_cache["relay_map"] = load_relay_map(relay_csv)
+        btc_cache["flagged_chains"], _ = detect_peeling_chains(tx_csv)
+        btc_cache["flagged_sweeps"] = detect_darknet_sweeps(tx_csv, btc_cache["relay_map"])
+        all_wallets = set()
+        for data in btc_cache["tx_map"].values():
+            for w, a, t in data["inputs"] + data["outputs"]:
+                all_wallets.add(w)
+        btc_cache["all_wallets"] = all_wallets
+
+        seeds = build_seeds(
+            btc_cache["tx_map"], btc_cache["relay_map"],
+            btc_cache["flagged_chains"],
+            f"{BTC_DATA_DIR}/ground_truth.json",
+            flagged_sweeps=btc_cache["flagged_sweeps"],
+        )
+        out_edges = build_wallet_graph(btc_cache["tx_map"])
+        seeded_ppr = personalized_pagerank(out_edges, seeds, all_wallets)
+        baseline_ppr = personalized_pagerank(out_edges, {}, all_wallets)
+        risk_ratios = compute_risk_ratio(seeded_ppr, baseline_ppr, all_wallets)
+        scored = compute_final_scores(seeds, risk_ratios, all_wallets)
+
+        btc_cache["seeds"] = seeds
+        btc_cache["scored_results"] = scored
+        btc_cache["scored_by_wallet"] = {r["wallet"]: r for r in scored}
+        btc_cache["loaded"] = True
+        print(f"[TRACE-X] Bitcoin layer online — "
+              f"{len(btc_cache['flagged_chains'])} peeling chains, "
+              f"{len(btc_cache['flagged_sweeps'])} darknet sweeps, "
+              f"{len(all_wallets)} wallets scored.")
+    except FileNotFoundError as e:
+        print(f"[TRACE-X] Bitcoin dataset not found, BTC endpoints disabled: {e}")
 
 @app.get("/")
 def root():
@@ -596,3 +654,82 @@ def export_csv():
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=tracenetx_flagged_accounts.csv"}
     )
+
+# ═══════════════════════════════════════════════════════════════
+# TRACE-X — Bitcoin Intelligence Layer
+# ═══════════════════════════════════════════════════════════════
+
+def _require_btc():
+    if not btc_cache.get("loaded"):
+        return {"error": "Bitcoin dataset not loaded — check server startup logs."}
+    return None
+
+@app.get("/btc/status")
+def btc_status():
+    err = _require_btc()
+    if err: return err
+    return {
+        "status": "ONLINE",
+        "transactions_indexed": len(btc_cache["tx_map"]),
+        "wallets_indexed": len(btc_cache["all_wallets"]),
+        "peeling_chains_flagged": len(btc_cache["flagged_chains"]),
+        "darknet_sweeps_flagged": len(btc_cache["flagged_sweeps"]),
+    }
+
+@app.get("/btc/peeling-chains")
+def btc_peeling_chains(limit: int = 25, min_confidence: float = 0.0):
+    err = _require_btc()
+    if err: return err
+    chains = [c for c in btc_cache["flagged_chains"] if c["confidence"] >= min_confidence]
+    return {"total": len(chains), "results": chains[:limit]}
+
+@app.get("/btc/darknet-sweeps")
+def btc_darknet_sweeps(limit: int = 25, min_confidence: float = 0.0):
+    err = _require_btc()
+    if err: return err
+    sweeps = [s for s in btc_cache["flagged_sweeps"] if s["confidence"] >= min_confidence]
+    return {"total": len(sweeps), "results": sweeps[:limit]}
+
+@app.get("/btc/wallet/{wallet_id}")
+def btc_wallet_detail(wallet_id: str):
+    err = _require_btc()
+    if err: return err
+
+    in_chains = [c for c in btc_cache["flagged_chains"] if wallet_id in c["chain_wallets"]]
+    in_sweeps = [s for s in btc_cache["flagged_sweeps"] if wallet_id in s["wallets"]]
+    score = btc_cache["scored_by_wallet"].get(wallet_id)
+
+    if not in_chains and not in_sweeps and score is None:
+        return {"error": f"wallet {wallet_id} not found in indexed transaction set"}
+
+    return {
+        "wallet_id": wallet_id,
+        "risk": score,
+        "peeling_chain_membership": in_chains,
+        "darknet_sweep_membership": in_sweeps,
+    }
+
+@app.get("/btc/risk-scores")
+def btc_risk_scores(tier: str = None, limit: int = 50, offset: int = 0):
+    err = _require_btc()
+    if err: return err
+    results = btc_cache["scored_results"]
+    if tier:
+        results = [r for r in results if r["tier"] == tier.upper()]
+    return {"total": len(results), "results": results[offset:offset + limit]}
+
+@app.get("/btc/dashboard")
+def btc_dashboard():
+    err = _require_btc()
+    if err: return err
+    results = btc_cache["scored_results"]
+    tier_counts = defaultdict(int)
+    for r in results:
+        tier_counts[r["tier"]] += 1
+    return {
+        "total_wallets": len(results),
+        "tier_breakdown": dict(tier_counts),
+        "top_10_critical": [r for r in results if r["tier"] == "CRITICAL"][:10],
+        "peeling_chains_flagged": len(btc_cache["flagged_chains"]),
+        "darknet_sweeps_flagged": len(btc_cache["flagged_sweeps"]),
+    }

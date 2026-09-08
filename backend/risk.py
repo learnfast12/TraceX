@@ -1,14 +1,14 @@
 import pandas as pd
 
-def calculate_risk(account_id: str):
+def calculate_risk(wallet_id: str):
     df = pd.read_csv("transactions.csv")
     score = 0
     flags = []
-    incoming = df[df["receiver_id"] == account_id]
-    outgoing = df[df["sender_id"] == account_id]
+    incoming = df[df["receiver_wallet"] == wallet_id]
+    outgoing = df[df["sender_wallet"] == wallet_id]
 
     # Flag 1: sends to multiple accounts
-    unique_receivers = outgoing["receiver_id"].nunique()
+    unique_receivers = outgoing["receiver_wallet"].nunique()
     if unique_receivers >= 3:
         score += 35
         flags.append(f"Sends to {unique_receivers} unique accounts — structuring pattern")
@@ -17,7 +17,7 @@ def calculate_risk(account_id: str):
         flags.append(f"Sends to {unique_receivers} accounts simultaneously")
 
     # Flag 2: receives from multiple accounts
-    unique_senders = incoming["sender_id"].nunique()
+    unique_senders = incoming["sender_wallet"].nunique()
     if unique_senders >= 3:
         score += 20
         flags.append(f"Receives from {unique_senders} different accounts — aggregation point")
