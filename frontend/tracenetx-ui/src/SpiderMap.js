@@ -18,26 +18,29 @@ const RISK_SIZE = {
   LOW:      24,
 };
 
-const TIER_ORDER = ["CRITICAL","HIGH","MEDIUM","SAFE","CLEAR","LOW"];
+// tier_role comes from the backend (real chain-hop position / sweep
+// membership) — never inferred from the wallet address string.
+const ROLE_TIER = {
+  source:      0,
+  hop:         1,
+  peel_sink:   2,
+  sweep_input: 3,
+  sweep_vault: 4,
+  sink:        4,
+};
 
 function getTier(node) {
-  const id = node.id.toUpperCase();
-  if (id.includes("CRIMINAL")) return 0;
-  if (id.includes("RECRUITER") || id.includes("RECR")) return 1;
-  if (id.startsWith("ACC_") || id.includes("MULE")) return 2;
-  if (id.includes("HAWALA") || id.includes("SHELL")) return 3;
-  if (id.includes("DEALER") || id.includes("COLLECTOR")) return 4;
-  if (id.includes("CRYPTO")) return 4;
-  return 2;
+  return ROLE_TIER[node.tier_role] ?? 1;
 }
 
 function shortLabel(id) {
-  if (id.length <= 9) return id;
-  // RECRUITER1 -> RECR.1
-  if (id.startsWith("RECRUITER")) return "RECR." + id.slice(-1);
-  // CRYPTO_GW -> CRYPTO
-  if (id.startsWith("CRYPTO")) return "CRYPTO";
-  return id.slice(0, 8) + "…";
+  if (id.length <= 12) return id;
+  return id.slice(0, 6) + "…" + id.slice(-4);
+}
+
+function formatBTC(amount) {
+  if (amount === null || amount === undefined) return null;
+  return "₿" + Number(amount).toFixed(4);
 }
 
 function SpiderMap({ graphData, onNodeClick, organized = true }) {
@@ -65,7 +68,7 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
     const tiers = { 0:[], 1:[], 2:[], 3:[], 4:[] };
     nodes.forEach(n => { tiers[getTier(n)].push(n); });
 
-    const TIER_Y = { 0:H*0.08, 1:H*0.26, 2:H*0.50, 3:H*0.72, 4:H*0.90 };
+    const TIER_Y = { 0:H*0.08, 1:H*0.28, 2:H*0.48, 3:H*0.68, 4:H*0.90 };
 
     const tierTargets = {};
     [0,1,2,3,4].forEach(ti => {
@@ -93,13 +96,10 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
       };
     });
 
-    /* lerp factor — animates between raw and organized */
     state.lerpT      = state.lerpT ?? (organized ? 1 : 0);
     state.lerpTarget = organized ? 1 : 0;
 
-    /* ── PHYSICS TICK ──────────────────────────────────────────── */
     function tick() {
-      /* lerp toward target layout */
       const tgt = state.lerpTarget;
       state.lerpT += (tgt - state.lerpT) * 0.06;
       if (state.lerpT > 0.95) state.lerpT = 1.0;
@@ -107,7 +107,6 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
       const ids = Object.keys(positions);
 
       if (state.lerpT < 1.0) {
-        /* force-directed when in raw mode */
         for (let i = 0; i < ids.length; i++) {
           for (let j = i+1; j < ids.length; j++) {
             const a = positions[ids[i]], b = positions[ids[j]];
@@ -134,14 +133,10 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         });
         ids.forEach(id => {
           const p = positions[id];
-          const isCriminal = id.toUpperCase().includes("CRIMINAL");
-          const isDealer = id.toUpperCase().includes("DEALER");
+          const tier = getTier(p.node);
           let pullX = W/2, pullY = H/2, pull = 0.004;
-          if (isCriminal) {
-            pullX = W/2; pullY = H * 0.3; pull = 0.05;
-          } else if (isDealer) {
-            pullX = W/2; pullY = H * 0.8; pull = 0.05;
-          }
+          if (tier === 0) { pullX = W/2; pullY = H * 0.2; pull = 0.05; }
+          else if (tier === 4) { pullX = W/2; pullY = H * 0.85; pull = 0.05; }
           p.vx += (pullX-p.x)*pull; p.vy += (pullY-p.y)*pull;
           p.vx *= 0.6; p.vy *= 0.6;
           p.x = Math.max(55, Math.min(W-55, p.x+p.vx));
@@ -149,7 +144,6 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         });
       }
 
-      /* lerp all nodes toward tier target */
       const lt = Math.min(state.lerpT, 1);
       ids.forEach(id => {
         const p = positions[id];
@@ -167,10 +161,9 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
       });
     }
 
-        /* ── PARTICLES ─────────────────────────────────────────────── */
     state.particles = [];
     edges.forEach((e, ei) => {
-      const count = (e.transfer_type === "SUSPECTED_CASH") ? 1 : 3;
+      const count = (e.transfer_type === "SWEEP_CONVERGE") ? 1 : 3;
       for (let p = 0; p < count; p++) {
         state.particles.push({
           ei, progress: Math.random(),
@@ -179,24 +172,21 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
       }
     });
 
-    /* ── DRAW ──────────────────────────────────────────────────── */
     function draw() {
       ctx.clearRect(0, 0, W, H);
 
-      /* grid dots */
       ctx.fillStyle = "rgba(255,255,255,0.025)";
       for (let x = 40; x < W; x += 55)
         for (let y = 40; y < H; y += 55) {
           ctx.beginPath(); ctx.arc(x, y, 1, 0, 2*Math.PI); ctx.fill();
         }
 
-      /* tier band labels */
       const bands = [
-        { y: TIER_Y[0], label: "CRIMINAL LAYER",      col: "rgba(255,45,45,0.08)"  },
-        { y: TIER_Y[1], label: "RECRUITER LAYER",     col: "rgba(255,107,0,0.06)"  },
-        { y: TIER_Y[2], label: "MULE LAYER",          col: "rgba(0,200,83,0.04)"   },
-        { y: TIER_Y[3], label: "INTERMEDIARY LAYER",  col: "rgba(255,179,0,0.06)"  },
-        { y: TIER_Y[4], label: "COLLECTION / EXIT",   col: "rgba(0,100,255,0.07)"  },
+        { y: TIER_Y[0], label: "SOURCE WALLET",     col: "rgba(255,45,45,0.08)"  },
+        { y: TIER_Y[1], label: "CHAIN HOP",         col: "rgba(255,107,0,0.06)"  },
+        { y: TIER_Y[2], label: "PEELED OFF",        col: "rgba(255,179,0,0.06)"  },
+        { y: TIER_Y[3], label: "SWEEP INPUT",       col: "rgba(0,200,83,0.04)"   },
+        { y: TIER_Y[4], label: "COLLECTION VAULT",  col: "rgba(0,100,255,0.07)"  },
       ];
       if (state.lerpT > 0.1) bands.forEach(b => {
         ctx.fillStyle = b.col;
@@ -209,17 +199,16 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         ctx.globalAlpha = 1;
       });
 
-      /* ── EDGES ─────────────────────────────────────────────── */
       edges.forEach(e => {
         const s = positions[e.source];
         const t = positions[e.target];
         if (!s || !t) return;
 
-        const isCash     = e.transfer_type === "SUSPECTED_CASH";
+        const isSweep    = e.transfer_type === "SWEEP_CONVERGE";
         const sLevel     = s.node.risk?.level || "CLEAR";
         const isSelected = state.selectedId === e.source || state.selectedId === e.target;
 
-        const edgeColor = isCash
+        const edgeColor = isSweep
           ? (isSelected ? "rgba(255,220,80,0.9)" : "rgba(255,220,80,0.4)")
           : sLevel === "CRITICAL"
             ? (isSelected ? "rgba(255,45,45,0.95)" : "rgba(255,45,45,0.5)")
@@ -227,7 +216,6 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
               ? (isSelected ? "rgba(255,107,0,0.9)" : "rgba(255,107,0,0.35)")
               : (isSelected ? "rgba(88,166,255,0.8)" : "rgba(88,166,255,0.18)");
 
-        /* curve control point */
         const cx = (s.x + t.x) / 2;
         const cy = (s.y + t.y) / 2;
 
@@ -235,7 +223,7 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         ctx.moveTo(s.x, s.y);
         ctx.quadraticCurveTo(cx, cy, t.x, t.y);
 
-        if (isCash) {
+        if (isSweep) {
           ctx.setLineDash([6, 5]);
           ctx.lineWidth = isSelected ? 2 : 1.5;
         } else {
@@ -246,7 +234,6 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        /* arrowhead at target */
         const angle = Math.atan2(t.y - cy, t.x - cx);
         const rNode = RISK_SIZE[t.node?.risk?.level] || 24;
         const ax = t.x - (rNode + 2) * Math.cos(angle);
@@ -256,31 +243,27 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         ctx.lineTo(ax - 10*Math.cos(angle-0.42), ay - 10*Math.sin(angle-0.42));
         ctx.lineTo(ax - 10*Math.cos(angle+0.42), ay - 10*Math.sin(angle+0.42));
         ctx.closePath();
-        ctx.fillStyle = isCash ? "rgba(255,220,80,0.7)" : edgeColor;
+        ctx.fillStyle = isSweep ? "rgba(255,220,80,0.7)" : edgeColor;
         ctx.fill();
 
-        /* amount label */
+        const amtLabel = formatBTC(e.amount);
         const midX = 0.25*s.x + 0.5*cx + 0.25*t.x;
         const midY = 0.25*s.y + 0.5*cy + 0.25*t.y - 7;
-        if (Math.abs(t.x - s.x) + Math.abs(t.y - s.y) > 60) {
+        if (amtLabel && Math.abs(t.x - s.x) + Math.abs(t.y - s.y) > 60) {
           ctx.font = "9px monospace";
-          ctx.fillStyle = isSelected ? "#fff" : (isCash ? "rgba(255,220,80,0.7)" : "rgba(150,150,150,0.7)");
+          ctx.fillStyle = isSelected ? "#fff" : (isSweep ? "rgba(255,220,80,0.7)" : "rgba(150,150,150,0.7)");
           ctx.textAlign = "center";
-          ctx.fillText(
-            (isCash ? "💵 " : "") + "₹" + (e.amount/1000).toFixed(0) + "K",
-            midX, midY
-          );
+          ctx.fillText(amtLabel, midX, midY);
         }
       });
 
-      /* ── PARTICLES ─────────────────────────────────────────── */
       state.particles.forEach(p => {
         const e = edges[p.ei];
         if (!e) return;
         const s = positions[e.source];
         const t = positions[e.target];
         if (!s || !t) return;
-        if (e.transfer_type === "SUSPECTED_CASH") { p.progress += p.speed; if(p.progress>1) p.progress=0; return; }
+        if (e.transfer_type === "SWEEP_CONVERGE") { p.progress += p.speed; if(p.progress>1) p.progress=0; return; }
         const sLevel = s.node?.risk?.level;
         const t2 = p.progress;
         const cx = (s.x+t.x)/2;
@@ -298,7 +281,6 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         if (p.progress > 1) p.progress = 0;
       });
 
-      /* ── NODES ─────────────────────────────────────────────── */
       Object.values(positions).forEach(p => {
         const n      = p.node;
         const level  = n.risk?.level || "CLEAR";
@@ -306,22 +288,18 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         const r      = RISK_SIZE[level]  || 24;
         const isSelected = state.selectedId === n.id;
 
-        /* CRITICAL pulse ring */
         if (level === "CRITICAL") {
           const pulse = Math.sin(state.pulseFrame * 0.13) * 0.5 + 0.5;
-          /* outer glow */
           const grd = ctx.createRadialGradient(p.x, p.y, r, p.x, p.y, r+28);
           grd.addColorStop(0, `rgba(255,45,45,${0.25 + pulse*0.25})`);
           grd.addColorStop(1, "rgba(0,0,0,0)");
           ctx.beginPath(); ctx.arc(p.x, p.y, r+28, 0, 2*Math.PI);
           ctx.fillStyle = grd; ctx.fill();
-          /* pulse ring */
           ctx.beginPath(); ctx.arc(p.x, p.y, r+10+pulse*10, 0, 2*Math.PI);
           ctx.strokeStyle = `rgba(255,45,45,${0.5+pulse*0.4})`;
           ctx.lineWidth = 2; ctx.stroke();
         }
 
-        /* HIGH glow */
         if (level === "HIGH") {
           const grd = ctx.createRadialGradient(p.x, p.y, r, p.x, p.y, r+18);
           grd.addColorStop(0, "rgba(255,107,0,0.3)");
@@ -330,7 +308,6 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
           ctx.fillStyle = grd; ctx.fill();
         }
 
-        /* selected ring */
         if (isSelected) {
           const pulse = Math.sin(state.pulseFrame * 0.1) * 0.5 + 0.5;
           ctx.beginPath(); ctx.arc(p.x, p.y, r+13+pulse*5, 0, 2*Math.PI);
@@ -338,9 +315,7 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
           ctx.lineWidth = 2.5; ctx.stroke();
         }
 
-        /* node fill */
         ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 2*Math.PI);
-        /* radial gradient fill for depth */
         const fill = ctx.createRadialGradient(p.x-r*0.3, p.y-r*0.3, 1, p.x, p.y, r);
         fill.addColorStop(0, color + "ff");
         fill.addColorStop(1, color + "99");
@@ -350,34 +325,27 @@ function SpiderMap({ graphData, onNodeClick, organized = true }) {
         ctx.lineWidth   = isSelected ? 3 : 1.8;
         ctx.stroke();
 
-        /* label inside node */
         const label = shortLabel(n.id);
-        const fs = r >= 36 ? 11 : r >= 28 ? 10 : 9;
-        ctx.font = `bold ${fs}px monospace`;
+        ctx.font = `bold 9px monospace`;
         ctx.fillStyle = "#fff";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(label, p.x, p.y);
 
-        /* risk badge below node — only for non-mule accounts */
-        if (!n.id.startsWith('ACC_')) {
-          ctx.font = "bold 8px monospace";
-          ctx.fillStyle = color;
-          ctx.textBaseline = "top";
-          const badge = level === "CLEAR" ? "SAFE" : level;
-          ctx.fillText(badge, p.x, p.y + r + 4);
-        }
+        ctx.font = "bold 8px monospace";
+        ctx.fillStyle = color;
+        ctx.textBaseline = "top";
+        const badge = level === "CLEAR" ? "SAFE" : level;
+        ctx.fillText(badge, p.x, p.y + r + 4);
       });
 
       state.pulseFrame++;
     }
 
-    // Run simulation fully offline - freeze before first draw
     for (let i = 0; i < 600; i++) tick();
     Object.values(positions).forEach(p => { p.vx = 0; p.vy = 0; });
 
     function loop() {
-      // positions are frozen - only particles and pulse animate
       draw();
       state.animId = requestAnimationFrame(loop);
     }

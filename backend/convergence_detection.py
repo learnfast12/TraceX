@@ -84,6 +84,7 @@ def find_sweep_candidates(tx_map, relay_map, incoming_index):
             "input_count": len(input_wallets),
             "distinct_deposit_ips": len(distinct_ips),
             "ip_reuse_ratio": round(reuse_ratio, 4),
+            "total_amount": total_amount,
         })
 
     return candidates

@@ -1,8 +1,17 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, BackgroundTasks
+import logging
+from fastapi import FastAPI, BackgroundTasks, Request, HTTPException, Query
+from models import (
+    BtcStatus, RiskScoresResponse, DashboardResponse,
+    PeelingChainsResponse, DarknetSweepsResponse, WalletDetailResponse,
+    AnomalyExplanationResponse, WalletGeoResponse, HealthResponse,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from graph import init_db, get_graph_data, get_account_details
 from risk import calculate_risk
 from ml_pipeline import ml_pipeline
@@ -20,9 +29,20 @@ from risk_scoring import (
     build_wallet_graph, build_seeds, personalized_pagerank,
     compute_risk_ratio, compute_final_scores,
 )
+from btc_anomaly import run_pipeline
+from network_fusion import build_wallet_ip_map, build_receiving_wallet_ip_map
+from geoip_lookup import load_country_index, load_asn_index, enrich_ip
+from shadow_entity_resolution import run_shadow_entity_resolution
 
-BTC_DATA_DIR = "dataset/output"
+import os as _os
+BTC_DATA_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "dataset", "output")
 btc_cache = {"loaded": False}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("tracex")
 
 app = FastAPI(
     title="TraceNetX v2.0",
@@ -30,12 +50,21 @@ app = FastAPI(
     version="2.0.0"
 )
 
+ALLOWED_ORIGINS = _os.environ.get(
+    "TRACEX_ALLOWED_ORIGINS",
+    "http://localhost:3002,http://127.0.0.1:3002"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.on_event("startup")
 def startup():
@@ -47,9 +76,9 @@ def startup():
         init_db()
         df = pd.read_csv("transactions.csv")
         ml_pipeline.train(df)
-        print("[TraceNetX v2.0] All systems online.")
+        logger.info("[TraceNetX v2.0] All systems online.")
     except Exception as e:
-        print(f"[TraceNetX] Legacy banking-layer startup skipped ({type(e).__name__}: {e})")
+        logger.warning(f"[TraceNetX] Legacy banking-layer startup skipped ({type(e).__name__}: {e})")
 
     try:
         tx_csv = f"{BTC_DATA_DIR}/bitcoin_transactions.csv"
@@ -76,35 +105,100 @@ def startup():
         risk_ratios = compute_risk_ratio(seeded_ppr, baseline_ppr, all_wallets)
         scored = compute_final_scores(seeds, risk_ratios, all_wallets)
 
+        # --- ML anomaly detection (Isolation Forest) — PS 26146 objective (iii) ---
+        anomaly_tx_df = pd.read_csv(tx_csv)
+        anomaly_result = run_pipeline(anomaly_tx_df, contamination=0.08)
+        anomaly_scores = anomaly_result["anomaly_scores"].to_dict()
+        btc_cache["anomaly_model"] = anomaly_result["model"]
+        btc_cache["anomaly_scaler"] = anomaly_result["scaler"]
+        btc_cache["anomaly_features"] = anomaly_result["features"]
+        btc_cache["anomaly_scores"] = anomaly_scores
+
+        for r in scored:
+            a_score = anomaly_scores.get(r["wallet"], 0.0)
+            r["anomaly_score"] = round(a_score, 2)
+            r["ml_blended_score"] = round(0.7 * r["final_score"] + 0.3 * a_score, 2)
+
+        # --- GeoIP/ASN enrichment — PS 26146 minimum dataset field ---
+        geo_dir = _os.path.join(BTC_DATA_DIR, "..", "geoip")
+        country_idx = load_country_index(_os.path.join(geo_dir, "dbip-country-lite.csv"))
+        asn_idx = load_asn_index(_os.path.join(geo_dir, "dbip-asn-lite.csv"))
+
+        sending_ip_map = build_wallet_ip_map(btc_cache["tx_map"], btc_cache["relay_map"])
+        receiving_ip_map = build_receiving_wallet_ip_map(btc_cache["tx_map"], btc_cache["relay_map"])
+
+        ip_geo_cache = {}
+        def _geo(ip):
+            if ip not in ip_geo_cache:
+                ip_geo_cache[ip] = enrich_ip(country_idx, asn_idx, ip)
+            return ip_geo_cache[ip]
+
+        wallet_geo = {}
+        for w in set(list(sending_ip_map.keys()) + list(receiving_ip_map.keys())):
+            send_ips = [_geo(ip) for ip in sending_ip_map.get(w, [])]
+            recv_ips = [_geo(ip) for ip in receiving_ip_map.get(w, [])]
+            wallet_geo[w] = {"sending_ips": send_ips, "receiving_ips": recv_ips}
+
+        btc_cache["wallet_geo"] = wallet_geo
+
+        # --- Shadow Entity Resolution — behavioral fingerprint clustering ---
+        shadow_result = run_shadow_entity_resolution(
+            btc_cache["tx_map"],
+            btc_cache["relay_map"],
+            anomaly_features=btc_cache.get("anomaly_features"),
+        )
+        btc_cache["shadow_cluster_labels"] = shadow_result["cluster_labels"]
+        btc_cache["shadow_cluster_probs"] = shadow_result["cluster_probs"]
+        btc_cache["shadow_matches"] = shadow_result["shadow_matches"]
+        btc_cache["shadow_backend"] = shadow_result["backend"]
+        btc_cache["shadow_diagnostics"] = shadow_result["diagnostics"]
+        d = shadow_result["diagnostics"]
+        logger.info(
+            f"[TRACE-X] Shadow Entity Resolution online — backend={shadow_result['backend']}, "
+            f"threshold={d.get('threshold_used', 'n/a'):.4f} (baseline mean={d.get('baseline_mean', 0):.4f}, "
+            f"p99={d.get('baseline_p99', 0):.4f}), "
+            f"{len(shadow_result['shadow_matches'])} wallets with shadow matches, "
+            f"{len(set(shadow_result['cluster_labels'].values()))} clusters."
+        )
+
+        for r in scored:
+            g = wallet_geo.get(r["wallet"], {"sending_ips": [], "receiving_ips": []})
+            r["geo_countries"] = sorted({e["geo_country"] for e in g["sending_ips"] + g["receiving_ips"] if isinstance(e["geo_country"], str)})
+            r["asns"] = sorted({e["asn"] for e in g["sending_ips"] + g["receiving_ips"] if isinstance(e["asn"], str)})
+
         btc_cache["seeds"] = seeds
         btc_cache["scored_results"] = scored
         btc_cache["scored_by_wallet"] = {r["wallet"]: r for r in scored}
         btc_cache["loaded"] = True
-        print(f"[TRACE-X] Bitcoin layer online — "
+        logger.info(f"[TRACE-X] Bitcoin layer online — "
               f"{len(btc_cache['flagged_chains'])} peeling chains, "
               f"{len(btc_cache['flagged_sweeps'])} darknet sweeps, "
               f"{len(all_wallets)} wallets scored.")
     except FileNotFoundError as e:
-        print(f"[TRACE-X] Bitcoin dataset not found, BTC endpoints disabled: {e}")
+        logger.error(f"[TRACE-X] Bitcoin dataset not found, BTC endpoints disabled: {e}")
+    except Exception:
+        logger.exception("[TRACE-X] Bitcoin layer failed to initialize (non-FileNotFoundError) — BTC endpoints disabled")
+
+@app.get("/health", response_model=HealthResponse, tags=["ops"])
+def health():
+    return HealthResponse(
+        status="ok",
+        btc_layer_loaded=btc_cache.get("loaded", False),
+    )
 
 @app.get("/")
 def root():
     return {
-        "system": "TraceNetX v2.0",
+        "system": "TRACE-X v1.0",
         "team": "OMEGA 404",
         "college": "Sri Sairam Engineering College, Chennai",
-        "hackathon": "CyberShield Hackathon 2026 — Bank of India",
+        "hackathon": "SIH 2026 — PS-26146 (NTRO)",
         "status": "ONLINE",
         "layers": ["DETECT", "INVESTIGATE", "ACT"],
         "endpoints": [
-            "/graph", "/account/{id}", "/filter", "/export",
-            "/alerts", "/path", "/dashboard",
-            "/ml/analyze", "/ml/account/{id}",
-            "/intelligence/full", "/intelligence/reverse-chain/{id}",
-            "/intelligence/community", "/intelligence/coordination",
-            "/intelligence/recruitment", "/intelligence/convergence",
-            "/intelligence/identity-fusion",
-            "/evidence/{id}", "/response/{score}"
+            "/btc/status", "/btc/graph", "/btc/wallet/{id}",
+            "/btc/peeling-chains", "/btc/darknet-sweeps",
+            "/btc/risk-scores", "/btc/dashboard"
         ]
     }
 
@@ -659,15 +753,26 @@ def export_csv():
 # TRACE-X — Bitcoin Intelligence Layer
 # ═══════════════════════════════════════════════════════════════
 
+import re as _re
+
+_WALLET_ID_RE = _re.compile(r"^bc1[a-z0-9]{10,80}$")
+_VALID_TIERS = {"CRITICAL", "HIGH", "MEDIUM", "CLEAR"}
+
 def _require_btc():
     if not btc_cache.get("loaded"):
-        return {"error": "Bitcoin dataset not loaded — check server startup logs."}
-    return None
+        raise HTTPException(
+            status_code=503,
+            detail="Bitcoin dataset not loaded — check server startup logs.",
+        )
 
-@app.get("/btc/status")
-def btc_status():
-    err = _require_btc()
-    if err: return err
+def _validate_wallet_id(wallet_id: str) -> None:
+    if not _WALLET_ID_RE.match(wallet_id):
+        raise HTTPException(status_code=400, detail="malformed wallet_id")
+
+@app.get("/btc/status", response_model=BtcStatus, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def btc_status(request: Request):
+    _require_btc()
     return {
         "status": "ONLINE",
         "transactions_indexed": len(btc_cache["tx_map"]),
@@ -676,31 +781,45 @@ def btc_status():
         "darknet_sweeps_flagged": len(btc_cache["flagged_sweeps"]),
     }
 
-@app.get("/btc/peeling-chains")
-def btc_peeling_chains(limit: int = 25, min_confidence: float = 0.0):
-    err = _require_btc()
-    if err: return err
+@app.get("/btc/peeling-chains", response_model=PeelingChainsResponse, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def btc_peeling_chains(
+    request: Request,
+    limit: int = Query(25, ge=1, le=500),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+):
+    _require_btc()
     chains = [c for c in btc_cache["flagged_chains"] if c["confidence"] >= min_confidence]
-    return {"total": len(chains), "results": chains[:limit]}
+    total = len(chains)
+    return {"total": total, "limit": limit, "has_more": limit < total, "results": chains[:limit]}
 
-@app.get("/btc/darknet-sweeps")
-def btc_darknet_sweeps(limit: int = 25, min_confidence: float = 0.0):
-    err = _require_btc()
-    if err: return err
+@app.get("/btc/darknet-sweeps", response_model=DarknetSweepsResponse, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def btc_darknet_sweeps(
+    request: Request,
+    limit: int = Query(25, ge=1, le=500),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+):
+    _require_btc()
     sweeps = [s for s in btc_cache["flagged_sweeps"] if s["confidence"] >= min_confidence]
-    return {"total": len(sweeps), "results": sweeps[:limit]}
+    total = len(sweeps)
+    return {"total": total, "limit": limit, "has_more": limit < total, "results": sweeps[:limit]}
 
-@app.get("/btc/wallet/{wallet_id}")
-def btc_wallet_detail(wallet_id: str):
-    err = _require_btc()
-    if err: return err
+@app.get("/btc/wallet/{wallet_id}", response_model=WalletDetailResponse, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def btc_wallet_detail(request: Request, wallet_id: str):
+    _validate_wallet_id(wallet_id)
+    _require_btc()
 
     in_chains = [c for c in btc_cache["flagged_chains"] if wallet_id in c["chain_wallets"]]
     in_sweeps = [s for s in btc_cache["flagged_sweeps"] if wallet_id in s["wallets"]]
     score = btc_cache["scored_by_wallet"].get(wallet_id)
 
     if not in_chains and not in_sweeps and score is None:
-        return {"error": f"wallet {wallet_id} not found in indexed transaction set"}
+        raise HTTPException(
+            status_code=404,
+            detail=f"wallet {wallet_id} not found in indexed transaction set",
+        )
 
     return {
         "wallet_id": wallet_id,
@@ -709,19 +828,37 @@ def btc_wallet_detail(wallet_id: str):
         "darknet_sweep_membership": in_sweeps,
     }
 
-@app.get("/btc/risk-scores")
-def btc_risk_scores(tier: str = None, limit: int = 50, offset: int = 0):
-    err = _require_btc()
-    if err: return err
+@app.get("/btc/risk-scores", response_model=RiskScoresResponse, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def btc_risk_scores(
+    request: Request,
+    tier: str = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    _require_btc()
     results = btc_cache["scored_results"]
     if tier:
-        results = [r for r in results if r["tier"] == tier.upper()]
-    return {"total": len(results), "results": results[offset:offset + limit]}
+        tier_upper = tier.upper()
+        if tier_upper not in _VALID_TIERS:
+            raise HTTPException(status_code=400, detail=f"tier must be one of {sorted(_VALID_TIERS)}")
+        results = [r for r in results if r["tier"] == tier_upper]
+    total = len(results)
+    page = results[offset:offset + limit]
+    next_offset = offset + limit
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": next_offset < total,
+        "next_offset": next_offset if next_offset < total else None,
+        "results": page,
+    }
 
-@app.get("/btc/dashboard")
-def btc_dashboard():
-    err = _require_btc()
-    if err: return err
+@app.get("/btc/dashboard", response_model=DashboardResponse, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def btc_dashboard(request: Request):
+    _require_btc()
     results = btc_cache["scored_results"]
     tier_counts = defaultdict(int)
     for r in results:
@@ -732,4 +869,96 @@ def btc_dashboard():
         "top_10_critical": [r for r in results if r["tier"] == "CRITICAL"][:10],
         "peeling_chains_flagged": len(btc_cache["flagged_chains"]),
         "darknet_sweeps_flagged": len(btc_cache["flagged_sweeps"]),
+    }
+
+@app.get("/btc/graph")
+@limiter.limit("30/minute")
+def btc_graph(request: Request):
+    _require_btc()
+    from btc_graph import build_btc_graph_data
+    return build_btc_graph_data(btc_cache)
+
+
+@app.get("/btc/wallet/{wallet_id}/anomaly-explanation", response_model=AnomalyExplanationResponse, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def get_anomaly_explanation(request: Request, wallet_id: str):
+    from btc_anomaly import explain_wallet
+
+    _validate_wallet_id(wallet_id)
+    if not btc_cache.get("loaded") or wallet_id not in btc_cache["anomaly_features"].index:
+        raise HTTPException(status_code=404, detail="wallet not found")
+
+    return {
+        "wallet": wallet_id,
+        "anomaly_score": round(btc_cache["anomaly_scores"].get(wallet_id, 0.0), 2),
+        "top_contributing_features": explain_wallet(
+            btc_cache["anomaly_model"],
+            btc_cache["anomaly_scaler"],
+            btc_cache["anomaly_features"],
+            wallet_id,
+        ),
+    }
+
+
+@app.get("/btc/wallet/{wallet_id}/geo", response_model=WalletGeoResponse, tags=["bitcoin"])
+@limiter.limit("60/minute")
+def get_wallet_geo(request: Request, wallet_id: str):
+    _validate_wallet_id(wallet_id)
+    if not btc_cache.get("loaded") or wallet_id not in btc_cache.get("wallet_geo", {}):
+        raise HTTPException(status_code=404, detail="wallet not found or has no observed IP activity")
+
+    return {
+        "wallet": wallet_id,
+        **btc_cache["wallet_geo"][wallet_id],
+    }
+
+
+@app.get("/btc/shadow-entities")
+@limiter.limit("30/minute")
+def btc_shadow_entities(request: Request, limit: int = Query(50, ge=1, le=500)):
+    if not btc_cache.get("loaded"):
+        raise HTTPException(status_code=503, detail="Bitcoin dataset not loaded")
+
+    labels = btc_cache.get("shadow_cluster_labels", {})
+    matches = btc_cache.get("shadow_matches", {})
+
+    clusters = {}
+    for wallet, label in labels.items():
+        if label == -1:
+            continue  # HDBSCAN noise — not a resolved shadow cluster
+        clusters.setdefault(label, []).append(wallet)
+
+    ranked = sorted(clusters.items(), key=lambda kv: -len(kv[1]))[:limit]
+
+    return {
+        "backend": btc_cache.get("shadow_backend"),
+        "diagnostics": btc_cache.get("shadow_diagnostics", {}),
+        "total_clusters": len(clusters),
+        "wallets_with_shadow_matches": len(matches),
+        "clusters": [
+            {"cluster_id": cid, "size": len(wallets), "wallets": wallets}
+            for cid, wallets in ranked
+        ],
+    }
+
+
+@app.get("/btc/wallet/{wallet_id}/shadow-matches")
+@limiter.limit("60/minute")
+def btc_wallet_shadow_matches(request: Request, wallet_id: str):
+    _validate_wallet_id(wallet_id)
+    if not btc_cache.get("loaded"):
+        raise HTTPException(status_code=503, detail="Bitcoin dataset not loaded")
+
+    matches = btc_cache.get("shadow_matches", {}).get(wallet_id)
+    if matches is None:
+        raise HTTPException(status_code=404, detail="wallet not found or has no shadow-match data")
+
+    cluster_id = btc_cache.get("shadow_cluster_labels", {}).get(wallet_id, -1)
+    cluster_prob = btc_cache.get("shadow_cluster_probs", {}).get(wallet_id, 0.0)
+
+    return {
+        "wallet": wallet_id,
+        "cluster_id": cluster_id,
+        "cluster_membership_confidence": cluster_prob,
+        "shadow_matches": matches,
     }

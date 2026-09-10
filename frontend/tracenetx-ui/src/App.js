@@ -1,3 +1,4 @@
+import BtcDashboard from "./BtcDashboard";
 import React, { useState, useEffect } from "react";
 import SpiderMap from "./SpiderMap";
 import Sidebar from "./Sidebar";
@@ -82,7 +83,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [organizedLayout, setOrganizedLayout] = useState(true);
   const [activeCase, setActiveCase] = useState("ALL");
-  const [activeTab, setActiveTab] = useState("map");
+  const [activeTab, setActiveTab] = useState("btc");
   const [exporting, setExporting] = useState(false);
   const [mlData, setMlData] = useState(null);
   const [mlLoading, setMlLoading] = useState(false);
@@ -206,7 +207,7 @@ function App() {
     if (tab === "validation" && !validationData) fetchValidation();
   };
 
-  useEffect(() => { fetchGraph(); }, []);
+  // fetchGraph() removed — Spider Map now lives in BtcDashboard, which fetches /btc/graph directly
 
   const highRiskCount = (graphData.nodes || []).filter(n => n.risk && n.risk.level === "HIGH").length;
   const medRiskCount = (graphData.nodes || []).filter(n => n.risk && n.risk.level === "MEDIUM").length;
@@ -239,10 +240,10 @@ function App() {
           }}>🕸</div>
           <div>
             <div style={{ display: "flex", alignItems: "baseline", gap: "8px" }}>
-              <span style={{ color: COLORS.gold, fontWeight: "700", fontSize: "1em", letterSpacing: "0.5px" }}>TraceNetX</span>
+              <span style={{ color: COLORS.gold, fontWeight: "700", fontSize: "1em", letterSpacing: "0.5px" }}>TRACE-X</span>
               <span style={{ color: COLORS.gold, fontFamily: "'IBM Plex Mono', monospace", fontSize: "0.68em", fontWeight: "600" }}>v2.0</span>
             </div>
-            <div style={{ color: COLORS.textMuted, fontSize: "0.68em", letterSpacing: "0.3px" }}>Mule Account Intelligence & Criminal Network Disruption</div>
+            <div style={{ color: COLORS.textMuted, fontSize: "0.68em", letterSpacing: "0.3px" }}>Bitcoin Transaction Intelligence — NTRO SIH 2026</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -250,7 +251,7 @@ function App() {
             background: "transparent", border: `1px solid ${COLORS.navyBorder}`,
             color: COLORS.textMuted, padding: "4px 12px", borderRadius: "4px",
             fontSize: "0.68em", fontFamily: "'IBM Plex Mono', monospace", letterSpacing: "1px"
-          }}>CYBERSHIELD 2026</span>
+          }}>SIH 2026 · NTRO</span>
           <span style={{
             background: "transparent", border: "1px solid #FF2D2D",
             color: "#FF2D2D", padding: "4px 12px", borderRadius: "4px",
@@ -259,7 +260,7 @@ function App() {
         </div>
       </header>
 
-      {/* STATS + NAV BAR */}
+      {/* NAV BAR — stat bar removed; BtcDashboard renders its own live stats */}
       <div style={{
         background: "#0A0E1A",
         borderBottom: `1px solid ${COLORS.navyBorder}`,
@@ -269,32 +270,17 @@ function App() {
         gap: "0",
         height: "48px",
       }}>
-        {[
-          { label: "Total Accounts", value: graphData.nodes.length, color: COLORS.text },
-          { label: "Transactions", value: graphData.edges.length, color: COLORS.text },
-          { label: "Flagged", value: (graphData.nodes || []).filter(n => n.risk && (n.risk.level === "HIGH" || n.risk.level === "CRITICAL")).length, color: COLORS.critical },
-          { label: "Medium Risk", value: medRiskCount, color: COLORS.medium },
-          { label: "Total Amount", value: `₹${(totalAmount / 100000).toFixed(1)}L`, color: COLORS.gold },
-        ].map((s, i) => (
-          <div key={i} style={{
-            padding: "0 20px",
-            borderRight: `1px solid ${COLORS.navyBorder}`,
-            display: "flex", flexDirection: "column", justifyContent: "center", height: "100%"
-          }}>
-            <div style={{ color: COLORS.textMuted, fontSize: "0.6em", letterSpacing: "1px", textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace" }}>{s.label}</div>
-            <div style={{ color: s.color, fontSize: "1em", fontWeight: "700", fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1.2 }}>{s.value}</div>
-          </div>
-        ))}
-
         <div style={{ display: "flex", alignItems: "center", gap: "2px", marginLeft: "auto", height: "100%" }}>
           {[
-            ["map", "🕸 Spider Map"],
-            ["ml", "🤖 ML Analysis"],
-            ["intelligence", "🧠 Intelligence"],
-            ["temporal", "⏱ Temporal"],
-            // ["validation", "🔬 Model Validation"], // hidden post-BOI, re-enable if needed
-            ["dashboard", "📊 Dashboard"],
-            ["citymap", "🗺 City Map"],
+            // Legacy banking-domain tabs (TraceNetX v1) — hidden for TRACE-X (Bitcoin domain).
+            // Code kept intact; re-enable by uncommenting if needed for reference.
+            // ["map", "🕸 Spider Map"],
+            // ["ml", "🤖 ML Analysis"],
+            // ["intelligence", "🧠 Intelligence"],
+            // ["temporal", "⏱ Temporal"],
+            // ["dashboard", "📊 Dashboard"],
+            // ["citymap", "🗺 City Map"],
+            ["btc", "₿ Bitcoin Intel"],
           ].map(([id, label]) => (
             <button key={id} onClick={() => handleTabSwitch(id)} style={{
               padding: "0 16px",
@@ -884,6 +870,7 @@ function App() {
   setFilters(newFilters);
   fetchGraph(newFilters);
 }} /></div>}
+        {activeTab === "btc" && <div style={{ flex: 1, overflowY: "auto" }}><BtcDashboard /></div>}
       </div>
     </div>
   );

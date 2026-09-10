@@ -5,3 +5,4 @@ __pycache__/
 # TRACE-X synthetic dataset — regeneratable, not committed
 dataset/output/*
 !dataset/output/.gitkeep
+dataset/geoip/*.csv
