@@ -6,3 +6,4 @@ __pycache__/
 dataset/output/*
 !dataset/output/.gitkeep
 dataset/geoip/*.csv
+backend/_archive_patches/
