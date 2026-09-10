@@ -871,6 +871,59 @@ def btc_dashboard(request: Request):
         "darknet_sweeps_flagged": len(btc_cache["flagged_sweeps"]),
     }
 
+@app.get("/btc/export", tags=["bitcoin"])
+@limiter.limit("10/minute")
+def btc_export(request: Request, tier: str = None):
+    """
+    CSV export of flagged BTC wallets for investigator handoff.
+    Columns: wallet, tier, final_score, direct_evidence_score,
+    propagated_score, anomaly_score, ml_blended_score, geo_countries, asns,
+    peeling_chain_count, darknet_sweep_count.
+    Excludes CLEAR tier by default (flagged wallets only), matching the
+    legacy /export convention.
+    """
+    _require_btc()
+    results = btc_cache["scored_results"]
+    if tier:
+        tier_upper = tier.upper()
+        if tier_upper not in _VALID_TIERS:
+            raise HTTPException(status_code=400, detail=f"tier must be one of {sorted(_VALID_TIERS)}")
+        results = [r for r in results if r["tier"] == tier_upper]
+    else:
+        results = [r for r in results if r["tier"] != "CLEAR"]
+
+    chain_membership = {}
+    for c in btc_cache.get("flagged_chains", []):
+        for w in c.get("chain_wallets", []) + c.get("peel_sink_wallets", []):
+            chain_membership[w] = chain_membership.get(w, 0) + 1
+    sweep_membership = {}
+    for s in btc_cache.get("flagged_sweeps", []):
+        for w in s.get("wallets", []):
+            sweep_membership[w] = sweep_membership.get(w, 0) + 1
+
+    import io, csv
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "wallet", "tier", "final_score", "direct_evidence_score", "propagated_score",
+        "anomaly_score", "ml_blended_score", "geo_countries", "asns",
+        "peeling_chain_count", "darknet_sweep_count",
+    ])
+    for r in results:
+        writer.writerow([
+            r["wallet"], r["tier"], r["final_score"], r["direct_evidence_score"], r["propagated_score"],
+            r.get("anomaly_score", ""), r.get("ml_blended_score", ""),
+            "|".join(r.get("geo_countries", [])), "|".join(r.get("asns", [])),
+            chain_membership.get(r["wallet"], 0), sweep_membership.get(r["wallet"], 0),
+        ])
+    from fastapi.responses import StreamingResponse
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=tracex_flagged_wallets.csv"},
+    )
+
 @app.get("/btc/graph")
 @limiter.limit("30/minute")
 def btc_graph(request: Request):

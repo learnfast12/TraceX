@@ -182,14 +182,14 @@ function App() {
   const handleExport = async () => {
     setExporting(true);
     try {
-      const res = await fetch("http://localhost:8001/export");
+      const res = await fetch("http://localhost:8002/btc/export");
       if (!res.ok) throw new Error(`Export failed: ${res.status}`);
       const csv = await res.text();
       const blob = new Blob([csv], { type: "text/csv" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "tracenetx_v2_flagged_accounts.csv";
+      a.download = "tracex_flagged_wallets.csv";
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {

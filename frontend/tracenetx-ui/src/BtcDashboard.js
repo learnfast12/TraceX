@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SpiderMap from "./SpiderMap";
 
-const API = "http://localhost:8001";
+const API = "http://localhost:8002";
 
 const C = {
   bg: "#05070c",
@@ -212,6 +212,10 @@ export default function BtcDashboard() {
   const [error, setError] = useState(null);
   const [graphData, setGraphData] = useState({ nodes: [], edges: [] });
   const [organizedLayout, setOrganizedLayout] = useState(true);
+  const [shadowData, setShadowData] = useState(null);
+  const [selectedCluster, setSelectedCluster] = useState(null);
+  const [clusterWalletMatches, setClusterWalletMatches] = useState(null);
+  const [clusterInspectWallet, setClusterInspectWallet] = useState(null);
   const mounted = useRef(false);
 
   const load = useCallback(() => {
@@ -220,6 +224,7 @@ export default function BtcDashboard() {
     fetch(`${API}/btc/graph`).then(r => r.json()).then(d => setGraphData({ nodes: d.nodes || [], edges: d.edges || [] })).catch(() => {});
     fetch(`${API}/btc/peeling-chains?limit=25`).then(r => r.json()).then(d => setChains(d.results || [])).catch(() => {});
     fetch(`${API}/btc/darknet-sweeps?limit=25`).then(r => r.json()).then(d => setSweeps(d.results || [])).catch(() => {});
+    fetch(`${API}/btc/shadow-entities`).then(r => r.json()).then(setShadowData).catch(() => {});
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -232,6 +237,14 @@ export default function BtcDashboard() {
     fetch(`${API}/btc/wallet/${walletId}`).then(r => r.json()).then(setWalletDetail).catch(() => {});
     fetch(`${API}/btc/wallet/${walletId}/anomaly-explanation`).then(r => r.json()).then(setAnomalyDetail).catch(() => setAnomalyDetail(null));
     fetch(`${API}/btc/wallet/${walletId}/geo`).then(r => r.json()).then(setGeoDetail).catch(() => setGeoDetail(null));
+  };
+
+  const openClusterWallet = (walletId) => {
+    setClusterInspectWallet(walletId);
+    fetch(`${API}/btc/wallet/${walletId}/shadow-matches`)
+      .then(r => r.json())
+      .then(setClusterWalletMatches)
+      .catch(() => setClusterWalletMatches(null));
   };
 
   if (error) {
@@ -271,7 +284,7 @@ export default function BtcDashboard() {
 
       {/* Tabs */}
       <div style={{ display: "flex", gap: 4, padding: "0 32px", borderBottom: `1px solid ${C.border}` }}>
-        {[["overview", "Overview"], ["chains", "Peeling Chains"], ["sweeps", "Darknet Sweeps"], ["spidermap", "Spider Map"]].map(([id, label]) => (
+        {[["overview", "Overview"], ["chains", "Peeling Chains"], ["sweeps", "Darknet Sweeps"], ["shadow", "Shadow Clusters"], ["spidermap", "Spider Map"]].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)} style={{
             background: "none", border: "none", padding: "12px 6px", cursor: "pointer",
             fontSize: 13, fontWeight: 600, color: tab === id ? C.text : C.textMuted,
@@ -425,6 +438,92 @@ export default function BtcDashboard() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {tab === "shadow" && (
+          <div style={{ display: "grid", gridTemplateColumns: selectedCluster ? "340px 1fr" : "1fr", gap: 20 }}>
+            <div>
+              {shadowData?.diagnostics && (
+                <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "14px 16px", marginBottom: 14 }}>
+                  <div style={{ fontSize: 10.5, color: C.textMuted, letterSpacing: 0.5, marginBottom: 10 }}>SHADOW ENTITY RESOLUTION — {shadowData.backend}</div>
+                  <div style={{ display: "flex", gap: 24 }}>
+                    <div>
+                      <div style={{ fontSize: 20, fontWeight: 700, fontFamily: C.mono, color: C.text }}>{shadowData.total_clusters}</div>
+                      <div style={{ fontSize: 10, color: C.textMuted }}>clusters</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 20, fontWeight: 700, fontFamily: C.mono, color: C.text }}>{shadowData.wallets_with_shadow_matches?.toLocaleString()}</div>
+                      <div style={{ fontSize: 10, color: C.textMuted }}>wallets matched</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 20, fontWeight: 700, fontFamily: C.mono, color: C.btc }}>{(shadowData.diagnostics.threshold_used * 100).toFixed(1)}%</div>
+                      <div style={{ fontSize: 10, color: C.textMuted }}>similarity threshold</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 10, color: C.textDim, marginTop: 10, fontFamily: C.mono }}>
+                    {shadowData.diagnostics.eligible_wallets?.toLocaleString()} eligible · {shadowData.diagnostics.excluded_low_event_wallets?.toLocaleString()} excluded (fewer than {shadowData.diagnostics.min_events_required} events) · baseline p99 similarity {(shadowData.diagnostics.baseline_p99 * 100).toFixed(1)}%
+                  </div>
+                </div>
+              )}
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 60px", gap: 12, padding: "9px 16px", fontSize: 10, color: C.textDim, letterSpacing: 0.5, borderBottom: `1px solid ${C.border}` }}>
+                  <span>CLUSTER</span><span>SIZE</span>
+                </div>
+                <div style={{ maxHeight: 520, overflowY: "auto" }}>
+                  {(shadowData?.clusters || []).map(c => (
+                    <div key={c.cluster_id} onClick={() => { setSelectedCluster(c); setClusterInspectWallet(null); setClusterWalletMatches(null); }} style={{
+                      display: "grid", gridTemplateColumns: "1fr 60px", gap: 12, padding: "10px 16px",
+                      borderBottom: `1px solid ${C.border}`, cursor: "pointer",
+                      background: selectedCluster?.cluster_id === c.cluster_id ? `${C.btc}10` : "transparent",
+                    }}>
+                      <span style={{ fontFamily: C.mono, fontSize: 12.5, color: C.text }}>Cluster #{c.cluster_id}</span>
+                      <span style={{ fontFamily: C.mono, fontSize: 12.5, color: C.textMuted }}>{c.size}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {selectedCluster && (
+              <div style={{ background: C.surfaceRaised, border: `1px solid ${C.border}`, borderRadius: 10, padding: 20 }}>
+                <div style={{ fontSize: 10.5, color: C.textMuted, letterSpacing: 1, marginBottom: 12 }}>
+                  CLUSTER #{selectedCluster.cluster_id} — {selectedCluster.size} WALLETS RESOLVED TO ONE SHADOW ENTITY
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: clusterInspectWallet ? 16 : 0, paddingBottom: clusterInspectWallet ? 16 : 0, borderBottom: clusterInspectWallet ? `1px solid ${C.border}` : "none" }}>
+                  {selectedCluster.wallets.map(w => (
+                    <button key={w} onClick={() => openClusterWallet(w)} style={{
+                      background: clusterInspectWallet === w ? `${C.btc}18` : "transparent",
+                      border: `1px solid ${clusterInspectWallet === w ? C.btc : C.border}`,
+                      borderRadius: 5, padding: "5px 10px", cursor: "pointer",
+                      fontFamily: C.mono, fontSize: 11.5, color: clusterInspectWallet === w ? C.btc : C.text,
+                    }}>{short(w, 6)}</button>
+                  ))}
+                </div>
+
+                {clusterInspectWallet && clusterWalletMatches?.shadow_matches && (
+                  <div>
+                    <div style={{ fontSize: 10.5, color: C.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
+                      SHADOW MATCHES FOR <CopyableHash value={clusterInspectWallet} size={11} />
+                    </div>
+                    <div style={{ fontSize: 10, color: C.textDim, marginBottom: 10 }}>
+                      Cluster membership confidence: {(clusterWalletMatches.cluster_membership_confidence * 100).toFixed(1)}%
+                    </div>
+                    {clusterWalletMatches.shadow_matches.map(m => (
+                      <div key={m.wallet} style={{ marginBottom: 8 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontFamily: C.mono, marginBottom: 3 }}>
+                          <CopyableHash value={m.wallet} size={11} />
+                          <span style={{ color: C.gold }}>{(m.similarity * 100).toFixed(2)}%</span>
+                        </div>
+                        <div style={{ height: 4, background: "#ffffff0a", borderRadius: 2, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${m.similarity * 100}%`, background: C.gold, borderRadius: 2 }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
